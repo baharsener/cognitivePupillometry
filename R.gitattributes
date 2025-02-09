@@ -2,6 +2,7 @@
 
 # Source files
 # ============
+*.Rmd linguist-language=R
 *.Rdata binary
 *.RData binary
 *.rda   binary
