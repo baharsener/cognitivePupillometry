@@ -11,6 +11,6 @@
 *.Rd    text
 *.Rdx   binary
 *.Rmd	  text
-*.R  	  text
+*.R     text
 *.Rproj text
-*.[Rr]md   linguist-detectable
+*.[Rr]md linguist-detectable=true
