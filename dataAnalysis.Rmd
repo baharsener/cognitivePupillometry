@@ -1,0 +1,1135 @@
+---
+title: "Results for `Adults use the mental timeline as a memory strategy`"
+author: "Anonymous contributor"
+output:
+  word_document: default
+  html_document: default
+date: "2025-03-04"
+editor_options:
+  chunk_output_type: console
+---
+Results section for the manuscript
+# Setup
+```{r setup, echo=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# ==== PATH SETUP ====
+# Uncomment the version that works on your system:
+#base_dir <- "."
+base_dir <- "/Users/baharsener/Library/CloudStorage/OneDrive-UW/Studies - LCD Lab/TripletGame/OSF"
+
+# Load packages
+library(tidyverse); library(PupillometryR); library(here); library(dplyr); library(data.table); library(janitor); library(pracma); library(stringr); library(ggplot2); library(ggbeeswarm); library(ggfittext); library(zoo); library(lme4); library(lmerTest); library(sjPlot); library(caret); library(gghalves); library(ggforce); library(ggdist); library(svglite); library(effects); library(psych); library(afex)
+
+# For bootstrapping 95% confidence intervals -- from Mike Frank https://github.com/langcog/KTE/blob/master/mcf.useful.R
+library(bootstrap)
+theta <- function(x,xdata,na.rm=T) {mean(xdata[x],na.rm=na.rm)}
+ci.low <- function(x,na.rm=T) {
+  quantile(bootstrap(1:length(x),1000,theta,x,na.rm=na.rm)$thetastar,.025,na.rm=na.rm)} 
+ci.high <- function(x,na.rm=T) {
+  quantile(bootstrap(1:length(x),1000,theta,x,na.rm=na.rm)$thetastar,.975,na.rm=na.rm) } 
+
+# Function to format p-values in APA style
+format_p <- function(pval) {
+  if (!is.numeric(pval)) stop("pval must be numeric")
+  sapply(pval, function(p) {
+    if (is.na(p)) return(NA_character_)
+    if (p < .001) {
+      " < .001"
+    } else if (p < .01) {
+      paste0(" = ", stringr::str_remove(format(round(p, 3), nsmall = 3), "^0"))
+    } else {
+      paste0(" = ", stringr::str_remove(format(round(p, 2), nsmall = 2), "^0"))
+    }
+  })
+}
+
+# Combine two data frames while preseving all columns
+rbind.all.columns <- function(x, y) {
+  x.diff <- setdiff(colnames(x), colnames(y))
+  y.diff <- setdiff(colnames(y), colnames(x))
+  x[, c(as.character(y.diff))] <- NA
+  y[, c(as.character(x.diff))] <- NA
+  return(rbind(x, y))
+}
+
+# ggplot theme for plots
+theme_Publication <- function(base_size=18, base_family="Helvetica") {
+  ggthemes::theme_foundation(base_size=base_size, base_family=base_family) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = ggplot2::rel(1.2), hjust = 0.5),
+      text = ggplot2::element_text(),
+      panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+      plot.background = ggplot2::element_rect(fill = "white", colour = NA),
+      panel.border = ggplot2::element_blank(),
+      axis.title = ggplot2::element_text(face = "bold", size = ggplot2::rel(1)),
+      axis.title.y = ggplot2::element_text(angle = 90, vjust = 2),
+      axis.title.x = ggplot2::element_text(vjust = -0.2),
+      axis.line = ggplot2::element_line(colour = "black"),
+      axis.ticks = ggplot2::element_line(),
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      legend.position = "right",
+      legend.direction = "vertical",
+      legend.key.size = grid::unit(0.8, "cm"),
+      legend.title = ggplot2::element_text(face = "bold", size = ggplot2::rel(0.8)),
+      legend.key = ggplot2::element_rect(colour = NA),
+      plot.margin = grid::unit(c(10,5,5,5), "mm"),
+      # keep facet header gray
+      strip.background = ggplot2::element_rect(fill = "#f0f0f0", colour = "#f0f0f0"),
+      strip.text = ggplot2::element_text(face = "bold"),
+      panel.spacing = grid::unit(1, "lines")
+    )
+}
+```
+
+# Load cleaned data produced from the dataCleaning.rmd script
+```{r clean data, echo=FALSE, include=FALSE, message=FALSE}
+# Clean pupil data
+all_data <- read.csv(here("Analysis/csv_output/allData.csv"), row.names = 1)
+
+# Clean retrieval data
+all_recall_clean <- read.csv(here("Analysis/csv_output/all_recall_clean.csv"), row.names = 1)
+
+# Clean relative pupil/gaze data during encoding
+enc_data_relative <- read.csv(here("Analysis/csv_output/enc_data_relative.csv"), row.names = 1)
+
+# Clean pupil/gaze data during retrieval
+retrieval_phase <- read.csv(here("Analysis/csv_output/retrieval_phase.csv"), row.names = 1)
+
+# Make sure all variables are formatted as we want them
+# Data types change again after reading in the csv, so make sure to make the changes after you load them. 
+#all_data
+all_data <- all_data %>%
+  mutate(across(
+    c(orderResponse, trialDirection, trial_category, trialOrder, block, encoding_order, preDecision),
+    as.factor))  # ensure categorical vars are factors for modeling/grouping
+
+#all_recall_clean
+all_recall_clean <- all_recall_clean %>%
+  mutate(across(
+    c(orderResponse, originTrialDir, encoding_order, encoding_position, block),
+    as.factor))  # ensure categorical vars are factors for modeling/grouping
+
+#enc_data_relative
+enc_data_relative <- enc_data_relative %>%
+  mutate(across(
+    c(RECORDING_SESSION_LABEL, orderResponse, trialDirection, trial_category, trialOrder, encoding_order, block),
+    as.factor))
+
+#retrieval_phase
+retrieval_phase <- retrieval_phase %>%
+  mutate(across(
+    c(RECORDING_SESSION_LABEL, orderResponse, trialDirection, trial_category, trialOrder, block, encoding_order, preDecision, block),
+    as.factor)) %>%
+  mutate(across(
+    c(LEFT_GAZE_X, LEFT_GAZE_Y),
+    as.numeric))
+
+# Confirm number of participants
+length(unique(all_data$RECORDING_SESSION_LABEL))
+length(unique(all_recall_clean$RECORDING_SESSION_LABEL))
+length(unique(enc_data_relative$RECORDING_SESSION_LABEL))
+length(unique(retrieval_phase$RECORDING_SESSION_LABEL))
+```
+
+#1. Recall accuracy
+### Calculate and visualize memory accuracy by trial direction
+```{r behavioral accuracy, echo=FALSE, include=FALSE, message=FALSE}
+# Subject-level accuracy for retrieval trials, grouped by direction
+ret_acc_sub <- all_recall_clean %>%
+  group_by(RECORDING_SESSION_LABEL, originTrialDir) %>%
+  summarise(acc = mean(is_correct), 
+            .groups = "drop")
+
+# Group-level accuracy for retrieval trials, grouped by direction
+ret_acc_group <- all_recall_clean %>%
+  group_by(originTrialDir) %>%
+  summarize(accuracy = mean(is_correct), 
+            n = n(), 
+            hi = ci.high(is_correct), 
+            low = ci.low(is_correct),
+            .groups = "drop")
+
+# Visualize behavioral accuracy
+acc_by_dir <- ggplot(data = ret_acc_sub, aes(x = originTrialDir, y = acc)) +
+  geom_violin(width = 0.5, alpha = 0.6, color="black", fill="forestgreen") +
+  geom_point(data=ret_acc_group, aes(y = accuracy), fill='white', shape=23, size=4) + 
+  geom_quasirandom(width = .15, size = 1, alpha = 1) +
+  geom_errorbar(data=ret_acc_group, aes(ymin = low, ymax =hi, y=NULL), width=0) + 
+  guides(fill = "none") +
+  scale_x_discrete(limits = c("LR","NL", "RL")) +
+  geom_hline(yintercept = .33, linetype="dashed", alpha=.5) + 
+  ylab("Accuracy") +
+  xlab("Trial Direction") + 
+  theme_Publication()
+
+unique(ret_acc_sub$RECORDING_SESSION_LABEL)
+```
+
+### Stats: Recall Accuracy by Trial Direction
+```{r accuracy x trial direction, echo=FALSE, include=FALSE, message=FALSE}
+# Linear mixed model exploring correct answers as a function of the original trial direction
+ACC_recall_block <- glmer(is_correct ~ originTrialDir + block + (1 | RECORDING_SESSION_LABEL), 
+                          family = binomial(link = "logit"), 
+                          control=glmerControl(optimizer="bobyqa"), 
+                          data = all_recall_clean)
+
+# Save the summary of the model
+ref_ACC_recall_block <- summary(ACC_recall_block)
+```
+**Recall Accuracy**
+First, we explored participants’ behavioral responses during the retrieval phase as a function of the direction in which the triplets were presented during the encoding phase. Participants were significantly less accurate in recalling the temporal order of the images when the triplets were presented from right-to-left ($\beta$ = `r round(ACC_recall_block@beta[2],2)`,  $p$ `r format_p(ref_ACC_recall_block$coefficients[2,4])`) or nonlinearly ($\beta$ = `r round(ACC_recall_block@beta[3],2)`,  $p$ `r format_p(ref_ACC_recall_block$coefficients[3,4])`) compared to when they were presented from left-to-right. There was no difference in accuracy across the two blocks ($\beta$ = `r round(ACC_recall_block@beta[4],2)`,  $p$ `r format_p(ref_ACC_recall_block$coefficients[4,4])`).
+
+### Visualize: Incorrect responses by encoding order and position
+```{r recall mistakes, echo=FALSE, include=FALSE, message=FALSE}
+# Add mistake categories to all_recall_clean (what was the order, and how did they answer?)
+all_recall_clean <- all_recall_clean %>%
+  mutate(
+    mistake_type = case_when(
+      encoding_order == "first" & orderResponse == "second" ~ "first->second",
+      encoding_order == "first" & orderResponse == "third" ~ "first->third",
+      encoding_order == "second" & orderResponse == "first" ~ "second->first",
+      encoding_order == "second" & orderResponse == "third" ~ "second=>third",
+      encoding_order == "third" & orderResponse == "first" ~ "third->first",
+      encoding_order == "third" & orderResponse == "second" ~ "third->second",
+      TRUE ~ "correct"
+    ))
+
+# Convert to factor
+all_recall_clean$mistake_type <- as.factor(all_recall_clean$mistake_type)
+
+# Group-level summary of correct answers and mistakes (proportions)
+recall_ans_breakdown <- all_recall_clean %>%
+  group_by(originTrialDir, encoding_position, encoding_order) %>%
+  mutate(total_trials = n()) %>%
+  group_by(originTrialDir, encoding_position, encoding_order, mistake_type) %>%
+  summarise(
+    count = n(),
+    total_trials = first(total_trials), # total trials for pos/order pair
+    prop = count / total_trials,
+    .groups = "drop"
+  )
+
+# Only mistakes, group-level, collapsed across blocks
+# For this, we want to just use the images that were displayed first or third
+mistake_group <- all_recall_clean %>%
+  filter(encoding_order != "second") %>%  # only get first or third
+  filter(is_correct == 0) %>% # only get the mistakes
+group_by(originTrialDir, encoding_position, encoding_order) %>%
+  mutate(total_trials = n()) %>%
+  group_by(originTrialDir, encoding_position, encoding_order, mistake_type) %>%
+  summarise(
+    count = n(),
+    total_trials = first(total_trials), # total trials for pos/order pair
+    prop = count/total_trials,
+    .groups = "drop"
+  )
+
+# Visualize mistakes by order and position (across both blocks)
+# Color vision deficiency safe colors
+ggplot(mistake_group %>% filter(mistake_type != "correct"),
+       aes(x = interaction(encoding_position, encoding_order), 
+           y = count, fill = mistake_type)) + 
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = c("#aa4499","#332288","#88ccee","#117733")) +
+  labs(
+    x = "Encoding Location and Order", 
+    y = "Mistake Count", 
+    title = "Proportion of Mistakes by Encoding Location and Order"
+  ) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  theme_Publication()
+```
+
+### Stats: Incorrect responses by encoding position and order
+```{r pairwise comparisons, echo=FALSE, include=FALSE, message=FALSE}
+# Stats: Does encoding position influence mistake types?
+# Compare 'first' vs. 'third' answers for images on left (L) and right (R), for incorrect responses
+first_v_third <- all_recall_clean %>%
+  group_by(encoding_position, encoding_order, orderResponse) %>%
+  filter(is_correct == 0, encoding_order != "second", orderResponse != "second", encoding_position != "M") %>%
+  group_by(encoding_position, encoding_order, orderResponse) %>%
+  mutate(total_trials = n()) %>%
+  summarise(total = first(total_trials), 
+            .groups = 'drop')
+
+# Mistakenly recalling 'first' item as third
+ans_third <- first_v_third %>% 
+  filter(encoding_order == "first") %>%
+  select(-encoding_order) %>%  # Remove encoding_order because all are first
+  pivot_wider(names_from = orderResponse, values_from = total, values_fill = 0)
+  
+# Mistakenly recalling 'third' item as first
+ans_first <- first_v_third %>% 
+  filter(encoding_order == "third") %>%
+  select(-encoding_order) %>%  # Remove encoding_order because all are third
+  pivot_wider(names_from = orderResponse, values_from = total, values_fill = 0)
+
+# Incorrect answers as a 2x2 matrix: responses as 'first' or 'third' 
+mistake_2x2 <- matrix(
+  c(ans_first$first,   # "first" responses for L and R (when the correct answer was third)
+    ans_third$third),  # "third" responses for L and R (when the correct answer was first)
+  nrow = 2,
+  byrow = FALSE,
+  dimnames = list(c("L", "R"), c("ans_first", "ans_third"))
+)
+
+# Chi-square test (all expected counts > 5)
+mistake_chi <- chisq.test(mistake_2x2)
+mistake_chi
+```
+Because participants made more mistakes in the right-to-left and nonlinear trials relative to left-to-right trials, we explored whether participants’ mistakes suggested mental organization of temporal order in terms of the mental timeline. For this analysis, we compared participants’ incorrect responses for items presented first and third in the triplets and on the left and right sides of the screen. Participants were significantly more likely to mistakenly recall an image presented third in the triplet as being presented first when the image was presented on the left side of the screen, relative to when it was presented on the right side of the screen, and more likely to mistakenly recall an image presented first in the triplet as presented third when the image was presented on the right side of the screen relative to when it was presented on the right side of the screen ($\chi^2$(`r mistake_chi$parameter`) = `r round(mistake_chi$statistic,2)`, $p$ `r format_p(mistake_chi$p.value)`). These results suggest that the spatial location of the items contribute to participants' recall errors when they are incongruent with the mental timeline.
+
+#2. Pupil Dilation at Encoding
+```{r encoding pup dilation, echo=FALSE, include=FALSE, message=FALSE}
+# Keep only encoding period after 1000 ms after the fixation cross up to 500 ms after the third image. 
+enc_firstview_data <- enc_data_relative %>%
+  filter(new_time > 2950) %>%
+  filter(new_time < 8050)
+
+# Mean relative pupil dilation over time per participant and trial direction
+enc_trialdir_subj <- enc_firstview_data %>%
+  group_by(new_time, trialDirection, RECORDING_SESSION_LABEL) %>%
+  summarise(mean_pup = mean(rel_pup), 
+            pup_sd = sd(rel_pup), 
+            pup_length = length(rel_pup), 
+            pup_sem = pup_sd/sqrt(pup_length), 
+            upper_CI = mean_pup + qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            lower_CI = mean_pup - qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            .groups = "drop") %>%
+  drop_na()
+
+# Group-level mean dilation
+enc_trialdir_group <- enc_trialdir_subj %>%
+  group_by(trialDirection, new_time) %>%
+  summarise(pupil = mean(mean_pup), 
+            .groups = "drop")
+```
+
+### Visualize: Encoding Pupil Dilation by Trial Direction
+```{r plot trial dir x pupil dilation, echo=FALSE, include=FALSE, message=FALSE}
+# Plot of pupil dilation during the encoding trial, across both blocks, grouped across participants
+# Visualize the whole time course:
+enc_plot_data <- enc_data_relative %>%
+  filter(new_time < 10000)
+
+# Mean relative pupil dilation over time per participant and trial direction
+enc_plot_data <- enc_plot_data %>%
+  group_by(new_time, trialDirection, RECORDING_SESSION_LABEL) %>%
+  summarise(mean_pup = mean(rel_pup), 
+            pup_sd = sd(rel_pup), 
+            pup_length = length(rel_pup), 
+            pup_sem = pup_sd/sqrt(pup_length), 
+            upper_CI = mean_pup + qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            lower_CI = mean_pup - qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            .groups = "drop") %>%
+  drop_na()
+
+enc_plot_data <- enc_plot_data %>%
+  group_by(trialDirection, new_time) %>%
+  summarise(pupil = mean(mean_pup), 
+            .groups = "drop")
+
+# Pink-purple colors are when triplet images appear
+# Visualize the first view
+dilation_plot <- ggplot(data = enc_plot_data,
+       aes(x=new_time, y = pupil, colour=as.factor(trialDirection))) + 
+  geom_line() + geom_point() + 
+  annotate("text", x=1500, y=0.1 , label = "Fixation", size = 2) +
+  annotate("rect", xmin=2000, xmax=3500, ymin=-Inf, ymax=Inf, alpha=0.2, fill="blueviolet") +
+  annotate("text", x=2750, y=0.1 , label = "Triplet 1", size = 2) + 
+  annotate("rect", xmin=4000, xmax=5500, ymin=-Inf, ymax=Inf, alpha=0.2, fill="blueviolet") +
+  annotate("text", x=4750, y=0.1 , label = "Triplet 2", size = 2) + 
+  annotate("rect", xmin=6000, xmax=7500, ymin=-Inf, ymax=Inf, alpha=0.2, fill="blueviolet") +
+  annotate("text", x=6750, y=0.1 , label = "Triplet 3", size = 2) +
+  annotate("text", x=8200, y=0.1 , label = "Mask", size = 2) +
+  scale_x_continuous(breaks = seq(1000,9500,1000), limits = c(1000,9500)) +
+  ylim(-0.3,0.1) + ylab("Relative pupil dilation (mm)") + 
+  xlab("Time (ms)") + labs(colour = "Trial Direction") +
+  scale_color_manual(values = c("#004488", "#DDAA33", "#BB5566")) +
+  ggtitle("Relative Pupil Dilation Over a Trial by Trial Direction") +
+  theme_Publication() 
+```
+
+###Stats: Encoding Pupil Dilation by Trial Direction
+```{r trial dir x pupil dilation model, echo=FALSE, include=FALSE, message=FALSE}
+# Summarize mean and maximum pupil dilation values per trial
+enc_trial_pupil_summary <- enc_firstview_data %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX, trialDirection, block) %>%
+  summarise(max_pup = max(rel_pup), 
+            mean_pup = mean(rel_pup), 
+            pup_sd = sd(rel_pup), 
+            pup_length = length(rel_pup), 
+            pup_sem = pup_sd/sqrt(pup_length), 
+            upper_CI = mean_pup + qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            lower_CI = mean_pup - qt(1 - (0.05 / 2), pup_length - 1) * pup_sem) %>%
+  drop_na()
+
+# 1. Pupil dilation by trial direction
+rel_pup_dir_block <- lmer(rel_pup ~ trialDirection + block + (1|RECORDING_SESSION_LABEL), data = enc_firstview_data)
+ref_rel_pup_dir <- summary(rel_pup_dir_block)
+
+# 2. Mean pupil dilation by trial direction
+mean_pup_dir <- lmer(mean_pup ~ trialDirection + block + (1|RECORDING_SESSION_LABEL), data = enc_trial_pupil_summary)
+ref_mean_pup_dir <- summary(mean_pup_dir)
+
+# 3. Maximum pupil dilation by trial direction, with block 
+max_pup_dir <- lmer(max_pup ~ trialDirection + block + (1|RECORDING_SESSION_LABEL), data = enc_trial_pupil_summary)
+ref_max_pup_dir <- summary(max_pup_dir)
+```
+**Pupil Dilation at Encoding**
+Our main analyses concerned two questions. First, we explored whether participants’ pupil dilation during the encoding phase changed as a function of trial direction. To explore changes in pupil dilation in relation to trial direction, we analyzed the baseline-corrected pupil values during two phases of the encoding trial. First, we explored the period starting from 1000 ms after the onset of the first image and extending until half a second after the end of the third image, corresponding to a 5000 ms period. This 1000 ms delay was implemented because the cognitive pupil dilation response emerges slowly (Hoeks & Levelt, 1993; Mathôt & Vilotijević, 2023). For the same reason, we included half a second period after the offset of the third image to capture responses to the third image (see Figure 4). Because both mental fatigue and familiarity with the experiment can influence pupil dilation (e.g., due to developing memory strategies), we used block as a fixed effect in this model (model syntax: relative pupil dilation ~ trial direction + block + (1|subject_id)).
+
+Relative to trials displayed from left-to-right, participants experienced significantly larger pupil dilation when trials were displayed from right-to-left ($\beta$ = `r round(rel_pup_dir_block@beta[2],2)`,  $p$ `r format_p(ref_rel_pup_dir$coefficients[2,5])`) or nonlinearly ($\beta$ = `r round(rel_pup_dir_block@beta[3],2)`,  $p$ `r format_p(ref_rel_pup_dir$coefficients[3,5])`). There was a main effect of the block, such that participants had higher pupil dilation during the second block ($\beta$ = `r round(rel_pup_dir_block@beta[4],3)`,  $p$ `r format_p(ref_rel_pup_dir$coefficients[4,5])`). Because there was a main effect of block, we included block as a fixed effect in all future models.
+
+We then analyzed mean and maximum pupil dilation values as a function of trial direction. Mean or maximum pupil dilation values did not vary as a function of trial direction (all $\beta$s < |`r round(mean_pup_dir@beta[3],2)`|, all $p$s > `r format_p(ref_mean_pup_dir$coefficients[3,5])`). This pattern of results suggest that differences in pupil dilation for different trial directions may in part be due to different dilation patterns, rather than overall increase in pupil dilation.
+
+## Pupil dilation at encoding by retrieval accuracy
+```{r encoding dilation with accuracy, echo=FALSE, include=FALSE, message=FALSE}
+# Merge pupil df with behavioral data (include trial info)
+enc_pup_tomerge <- enc_firstview_data %>%
+  group_by(TRIAL_INDEX, trialDirection, RECORDING_SESSION_LABEL, block) %>%
+  summarise(max_pup = max(rel_pup), 
+            mean_pup = mean(rel_pup), 
+            pup_sd = sd(rel_pup), 
+            pup_length = length(rel_pup), 
+            pup_sem = pup_sd/sqrt(pup_length), 
+            upper_CI = mean_pup + qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            lower_CI = mean_pup - qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            .groups = "drop") %>%
+  drop_na()
+
+# Now I have to manipulate the recall dataframe to be able to merge with the dilation data: renaming originEncodingTrial to TRIAL_INDEX to merge using that (because the trial index here in this df is the index of the retrieval trial)
+recall_trial_info <- all_recall_clean %>%
+  select(-c(TRIAL_INDEX)) %>%
+  rename(TRIAL_INDEX = originEncodingTrial)
+
+# Make sure variable types match
+recall_trial_info$RECORDING_SESSION_LABEL <- as.factor(recall_trial_info$RECORDING_SESSION_LABEL)
+enc_pup_tomerge$RECORDING_SESSION_LABEL <- as.factor(enc_pup_tomerge$RECORDING_SESSION_LABEL)
+
+# Merge
+pupil_acc_encoding <- enc_pup_tomerge %>%
+  left_join(recall_trial_info, by = c("RECORDING_SESSION_LABEL", "TRIAL_INDEX"))
+
+pupil_acc_encoding <- pupil_acc_encoding %>%
+  filter(!is.na(retrievalImage)) %>%
+  select(-c(block.y)) %>%
+  rename(block = block.x)
+
+# Sanity check: check if levels are the same before seeing if they match:
+if (!all(levels(pupil_acc_encoding$originTrialDir) %in% levels(pupil_acc_encoding$trialDirection))) {
+  cat("Levels in 'originTrialDir' not in 'trialDirection':\n",
+      setdiff(levels(pupil_acc_encoding$originTrialDir), levels(pupil_acc_encoding$trialDirection)), "\n")
+} else {
+  cat("All levels in 'originTrialDir' are present in 'trialDirection'.\n")
+}
+
+if (!all(levels(pupil_acc_encoding$trialDirection) %in% levels(pupil_acc_encoding$originTrialDir))) {
+  cat("Levels in 'trialDirection' not in 'originTrialDir':\n",
+      setdiff(levels(pupil_acc_encoding$trialDirection), levels(pupil_acc_encoding$originTrialDir)), "\n")
+} else {
+  cat("All levels in 'trialDirection' are present in 'originTrialDir'.\n")
+}
+
+# Sanity check, print rows where trial direction and origin trial direction columns do not match
+pupil_acc_encoding[pupil_acc_encoding$trialDirection != pupil_acc_encoding$originTrialDir, ]
+```
+
+###Stats: Recall Accuracy by Trial Direction and Pupil Dilation at Encoding
+```{r stats for accyracy by trial direction and pupil dilation, echo=FALSE, include=FALSE, message=FALSE}
+# Make sure all data types are as expected before running stats
+summary(pupil_acc_encoding)
+
+# Some variables need to be turned into factors
+pupil_acc_encoding <- pupil_acc_encoding %>%
+  mutate(across(c(
+    trialDirection, block), as.factor))
+
+# 1. Does mean dilation during encoding predict accuracy?
+acc_by_mean_dilation <- glmer(is_correct ~ mean_pup * trialDirection + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = pupil_acc_encoding)
+ref_acc_mean_dilation <- summary(acc_by_mean_dilation)
+
+# Visualize the interaction
+plot_model(acc_by_mean_dilation, type = "int")
+
+# 2. Does maximum dilation during encoding predict accuracy?
+acc_by_max_dilation <- glmer(is_correct ~ max_pup * trialDirection + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                             family = binomial(link = "logit"), 
+                             control = glmerControl(optimizer="bobyqa"), 
+                             data = pupil_acc_encoding)
+
+ref_acc_max_dilation <- summary(acc_by_max_dilation)
+
+# Visualize the interaction
+plot_model(acc_by_max_dilation, type = "int")
+
+# Separate the different trial directions and look within those, because some trial directions are more difficult than others, they may increase dilation but lower accuracy, and this may cancel the effects.
+
+# First separate them
+pupil_acc_LR <- pupil_acc_encoding %>%
+  filter(originTrialDir == "LR")
+
+pupil_acc_RL <- pupil_acc_encoding %>%
+  filter(originTrialDir == "RL")
+
+pupil_acc_NL <- pupil_acc_encoding %>%
+  filter(originTrialDir == "NL")
+
+# Does mean dilation during encoding predict accuracy for:
+# LR trials
+acc_LR_mean_dilation <- glmer(is_correct ~ mean_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = pupil_acc_LR)
+ref_acc_LR_mean_dilation <- summary(acc_LR_mean_dilation)
+plot_model(acc_LR_mean_dilation, type = "pred", terms="mean_pup [all]")
+
+# RL trials
+acc_RL_mean_dilation <- glmer(is_correct ~ mean_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = pupil_acc_RL)
+ref_acc_RL_mean_dilation <- summary(acc_RL_mean_dilation)
+plot_model(acc_RL_mean_dilation, type = "pred", terms="mean_pup [all]")
+
+# NL trials
+acc_NL_mean_dilation <- glmer(is_correct ~ mean_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = pupil_acc_NL)
+ref_acc_NL_mean_dilation <- summary(acc_NL_mean_dilation)
+plot_model(acc_NL_mean_dilation, type = "pred", terms="mean_pup [all]")
+
+# Does maximum dilation during encoding predict accuracy for: 
+# LR trials
+acc_LR_max_dilation <- glmer(is_correct ~ max_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = pupil_acc_LR)
+ref_acc_LR_max_dilation <- summary(acc_LR_max_dilation)
+
+# RL trials
+acc_RL_max_dilation <- glmer(is_correct ~ max_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = pupil_acc_RL)
+ref_acc_RL_max_dilation <- summary(acc_RL_max_dilation)
+
+# NL trials
+acc_NL_max_dilation <- glmer(is_correct ~ max_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = pupil_acc_NL)
+ref_acc_NL_max_dilation <- summary(acc_NL_max_dilation)
+```
+
+#3. Pupil Dilation After Image Viewing (mask period)
+### Dilation by trial direction
+```{r pupil dilation at mask, echo=FALSE, include=FALSE, message=FALSE}
+# Re-load the relative pupil dilation df and reduce data to only have the mask period
+enc_data_mask <- enc_data_relative %>% 
+  filter(new_time > 7450 & new_time < 9550)
+
+# Mean relative pupil dilation over time per participant and trial direction
+mask_trialdir_subj <- enc_data_mask %>%
+  group_by(trialDirection, RECORDING_SESSION_LABEL, block) %>%
+  summarise(max_pup = max(rel_pup), 
+            mean_pup = mean(rel_pup), 
+            pup_sd = sd(rel_pup), 
+            pup_length = length(rel_pup), 
+            pup_sem = pup_sd/sqrt(pup_length), 
+            upper_CI = mean_pup + qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            lower_CI = mean_pup - qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            .groups = "drop") %>%
+  drop_na()
+
+# Group-level dilation per direction
+mask_trialdir_group <- enc_data_mask %>%
+  group_by(trialDirection, new_time) %>%
+  summarise(mean_pup = mean(rel_pup),
+            .groups = "drop")
+```
+
+###Stats: Mask Pupil Dilation by Trial Direction
+```{r trial dir x pupil dilation during mask, echo=FALSE, include=FALSE}
+# Summarize mean and maximum pupil dilation values per trial
+enc_mask_pupil_summary <- enc_data_mask %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX, trialDirection, block) %>%
+  summarise(max_pup = max(rel_pup), 
+            mean_pup = mean(rel_pup), 
+            pup_sd = sd(rel_pup), 
+            pup_length = length(rel_pup), 
+            pup_sem = pup_sd/sqrt(pup_length), 
+            upper_CI = mean_pup + qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            lower_CI = mean_pup - qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            .groups = "drop") %>%
+  drop_na()
+
+# 1. Relative pupil dilation by trial direction
+maskpup_dir <- lmer(rel_pup ~ trialDirection + block + (1|RECORDING_SESSION_LABEL), data = enc_data_mask)
+ref_maskpup_dir <- summary(maskpup_dir)
+
+# 2. Mean pupil dilation by trial direction
+maskpup_mean <- lmer(mean_pup ~ trialDirection + block + (1|RECORDING_SESSION_LABEL), 
+                           data = enc_mask_pupil_summary)
+ref_maskpup_mean <- summary(maskpup_mean)
+
+# 3. Maximum pupil dilation by trial direction
+maskpup_max <- lmer(max_pup ~ trialDirection + block + (1|RECORDING_SESSION_LABEL), 
+                          data = enc_mask_pupil_summary)
+ref_maskpup_max <- summary(maskpup_max)
+```
+**Pupil Dilation After Image Viewing**
+Next, we explored the participants’ pupil dilation after viewing the triplets, while the mask image was presented. For this analysis, we included pupil values for the time the mask image was presented, which corresponds to a 2000 ms period after the third triplet image disappears (See Figure 4). Because pupil dilation carryover effects can last 2000-3000 ms after stimulus onset, and because pupil dilation response to internal cognitive processes can take longer to arise relative to stimuli with a defined onset (Mathôt & Vilotijević, 2023), this additional exploration was to assess whether these two time periods, one of actively viewing the images and committing to memory and the other of maintaining in memory, may reveal different patterns. Similar to previous analyses, because both mental fatigue and memory strategies can influence pupil dilation and retrieval accuracy, we used block as a fixed effect in these models.
+
+Relative to trials displayed from left-to-right, participants experienced significantly smaller pupil dilation when trials were displayed nonlinearly ($\beta$ = `r round(maskpup_dir@beta[2],2)`,  $p$ `r format_p(ref_maskpup_dir$coefficients[2,5])`) but not from trials displayed from right-to-left ($\beta$ = `r round(maskpup_dir@beta[3],2)`, $p$ `r format_p(ref_maskpup_dir$coefficients[3,5])`) (see Figure 5). Similar to previous analyses, there was a main effect of block, however, it was in the opposite pattern such that participants had overall lower pupil dilation during the second block ($\beta$ = `r round(maskpup_dir@beta[4],2)`,  $p$ `r format_p(ref_maskpup_dir$coefficients[4,5])`).
+
+We then analyzed mean and maximum pupil dilation values as a function of trial direction. Trial direction did not influence mean or maximum pupil values during the two seconds following the initial triplet presentations (all $\beta$s < |`r round(maskpup_mean@beta[2],2)`|, all $p$s > `r format_p(ref_maskpup_mean$coefficients[2,5])`). This pattern of results suggest that differences in pupil dilation for different trial directions may in part be due to different dilation patterns.
+
+### Recall Accuracy by Pupil Dilation at Mask
+```{r encoding dilation with accuracy mask, echo=FALSE, include=FALSE, message=FALSE}
+# Manipulate pupil df to merge with behavioral data (include trial info)
+mask_pup_tomerge <- enc_data_mask %>%
+  group_by(TRIAL_INDEX, trialDirection, RECORDING_SESSION_LABEL, block) %>%
+  summarise(max_pup = max(rel_pup), 
+            mean_pup = mean(rel_pup), 
+            pup_sd = sd(rel_pup), 
+            pup_length = length(rel_pup), 
+            pup_sem = pup_sd/sqrt(pup_length), 
+            upper_CI = mean_pup + qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            lower_CI = mean_pup - qt(1 - (0.05 / 2), pup_length - 1) * pup_sem,
+            .groups = "drop") %>%
+  drop_na()
+
+# Recreate recall_trial_info
+# Renaming originEncodingTrial to TRIAL_INDEX to merge (because the trial index here in this df is the index of the retrieval trial)
+recall_trial_info <- all_recall_clean %>%
+  select(-c(TRIAL_INDEX)) %>%
+  rename(TRIAL_INDEX = originEncodingTrial)
+
+# Make sure variable types match
+recall_trial_info$RECORDING_SESSION_LABEL <- as.factor(recall_trial_info$RECORDING_SESSION_LABEL)
+mask_pup_tomerge$RECORDING_SESSION_LABEL <- as.factor(mask_pup_tomerge$RECORDING_SESSION_LABEL)
+
+# Merge
+pupil_acc_mask <- mask_pup_tomerge %>%
+  left_join(recall_trial_info, by = c("RECORDING_SESSION_LABEL", "TRIAL_INDEX"))
+
+pupil_acc_mask <- pupil_acc_mask %>%
+  filter(!is.na(retrievalImage)) %>%
+  select(-c(block.y)) %>%
+  rename(block = block.x)
+
+# Sanity check: check if levels are the same before seeing if they match:
+if (!all(levels(pupil_acc_mask$originTrialDir) %in% levels(pupil_acc_mask$trialDirection))) {
+  cat("Levels in 'originTrialDir' not in 'trialDirection':\n",
+      setdiff(levels(pupil_acc_mask$originTrialDir), levels(pupil_acc_mask$trialDirection)), "\n")
+} else {
+  cat("All levels in 'originTrialDir' are present in 'trialDirection'.\n")
+}
+
+if (!all(levels(pupil_acc_mask$trialDirection) %in% levels(pupil_acc_mask$originTrialDir))) {
+  cat("Levels in 'trialDirection' not in 'originTrialDir':\n",
+      setdiff(levels(pupil_acc_mask$trialDirection), levels(pupil_acc_mask$originTrialDir)), "\n")
+} else {
+  cat("All levels in 'trialDirection' are present in 'originTrialDir'.\n")
+}
+# Sanity check, print rows where trial direction and origin trial direction columns do not match
+pupil_acc_mask[pupil_acc_mask$trialDirection != pupil_acc_mask$originTrialDir, ]
+```
+
+###Stats: Recall Accuracy by Trial Direction and Pupil Dilation at Mask
+```{r stats: trial direction and pupil dilation, echo=FALSE, include=FALSE, message=FALSE}
+# Make sure all data types are as expected before running stats
+summary(pupil_acc_mask)
+
+# 1. Does mean dilation during encoding predict accuracy?
+mask_mean_acc <- glmer(is_correct ~ mean_pup * trialDirection + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                       family = binomial(link = "logit"), control = glmerControl(optimizer="bobyqa"), 
+                       data = pupil_acc_mask)
+ref_mask_mean_acc <- summary(mask_mean_acc)
+
+# Visualize the interaction
+plot_model(mask_mean_acc, type = "int")
+
+# 2. Does maximum dilation during encoding predict accuracy?
+mask_max_acc <- glmer(is_correct ~ max_pup * trialDirection + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                      family = binomial(link = "logit"), control = glmerControl(optimizer="bobyqa"), 
+                      data = pupil_acc_mask)
+
+ref_mask_max_acc <- summary(mask_max_acc)
+
+# Visualize the interaction
+plot_model(mask_max_acc, type = "int")
+
+# Separate the different trial directions and look within those, because some trial directions are more difficult than others, they may increase dilation but lower accuracy, and this may cancel the effects.
+
+# First separate them
+mask_acc_LR <- pupil_acc_mask %>%
+  filter(originTrialDir == "LR")
+
+mask_acc_RL <- pupil_acc_mask %>%
+  filter(originTrialDir == "RL")
+
+mask_acc_NL <- pupil_acc_mask %>%
+  filter(originTrialDir == "NL")
+
+# Does mean dilation during encoding predict accuracy for:
+# LR trials
+mask_acc_LR_mean_dilation <- glmer(is_correct ~ mean_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = mask_acc_LR)
+ref_mask_acc_LR_mean_dilation <- summary(mask_acc_LR_mean_dilation)
+
+# RL trials
+mask_acc_RL_mean_dilation <- glmer(is_correct ~ mean_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = mask_acc_RL)
+ref_mask_acc_RL_mean_dilation <- summary(mask_acc_RL_mean_dilation)
+
+# NL trials
+mask_acc_NL_mean_dilation <- glmer(is_correct ~ mean_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = mask_acc_NL)
+ref_mask_acc_NL_mean_dilation <- summary(mask_acc_NL_mean_dilation)
+
+# Does maximum dilation during encoding predict accuracy for: 
+# LR trials
+mask_acc_LR_max_dilation <- glmer(is_correct ~ max_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = mask_acc_LR)
+ref_mask_acc_LR_max_dilation <- summary(mask_acc_LR_max_dilation)
+
+# RL trials
+mask_acc_RL_max_dilation <- glmer(is_correct ~ max_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = mask_acc_RL)
+ref_mask_acc_RL_max_dilation <- summary(mask_acc_RL_max_dilation)
+
+# NL trials
+mask_acc_NL_max_dilation <- glmer(is_correct ~ max_pup + encoding_order + block + (1|RECORDING_SESSION_LABEL), 
+                              family = binomial(link = "logit"), 
+                              control = glmerControl(optimizer="bobyqa"), 
+                              data = mask_acc_NL)
+ref_mask_acc_NL_max_dilation <- summary(mask_acc_NL_max_dilation)
+```
+
+
+**Pupil Dilation and Memory Accuracy**
+Next, we explored whether mean and maximum pupil dilation during either phase (while viewing the images or after viewing the images) of the encoding trials predicted accuracy at the retrieval phase. In these models, we also included encoding order as a fixed effect, to control for the possibility that item order within the triplet may influence memory accuracy (model syntax for mean dilation glmer(recall_accuracy ~ mean_pupil_dilation * trialDirection + encoding_order + block + (1|subject_id), model syntax for maximum dilation: glmer( recall_accuracy ~ maximum_pupil_dilation * trialDirection + encoding_order + block + (1|subject_id)).
+
+In all four models, there was a main effect of trial type, such that participants were less accurate for trials in which the triplets were presented from right to left (all $\beta$s > |`r round(ref_acc_max_dilation$coefficients[4,1],2)`|, all $p$s < `r format_p(ref_acc_max_dilation$coefficients[4,4])`) or nonlinearly (all $\beta$s > |`r round(ref_acc_mean_dilation$coefficients[3,1],2)`|, all $p$s < `r format_p(ref_acc_mean_dilation$coefficients[3,4])`). There was a main effect of encoding order in all models, such that the images presented third in the triplet were less likely to be accurately remembered relative to those presented first in the triplet (all $\beta$s > `r round(acc_by_max_dilation@beta[6],2)`, all $p$s < `r format_p(ref_acc_max_dilation$coefficients[6,4])`).
+
+However, neither mean nor maximum pupil dilation values at encoding predict accuracy at the retrieval phase (all $\beta$s < |`r round(ref_acc_mean_dilation$coefficients[9,1],2)`|, all $p$s > `r format_p(ref_acc_mean_dilation$coefficients[9,4])`).
+There was a main effect of encoding order in all models, such that the images presented third in the triplet were less likely to be accurately remembered relative to those presented first in the triplet (all $\beta$s < |`r round(acc_by_max_dilation@beta[6],2)`|, all $p$s < `r format_p(ref_acc_max_dilation$coefficients[6,4])`).
+
+Because trial directions incongruent with the mental timeline yielded both higher pupil dilation and lower accuracy, we ran these analyses exploring whether mean and maximum pupil dilation during either phase (while viewing the images or after viewing the images) of the encoding trials predicted accuracy at the retrieval phase, for each trial direction. We found that for trials that were presented from right to left, both mean and maximum pupil dilation values predicted higher accuracy for both phases (all $\beta$s > |`r round(acc_RL_max_dilation@beta[2],2)`|, all $p$s < `r format_p(ref_acc_RL_max_dilation$coefficients[2,4])`). For trials presented from left to right, smaller mean pupil dilation values during image encoding trended towards predicting lower accuracy ($\beta$s = `r round(acc_LR_mean_dilation@beta[2],2)`, $p$ `r format_p(ref_acc_LR_mean_dilation$coefficients[2,4])`). Maximum pupil dilation during this period, or mean or maximum dilation during the mask phase did not predict accuracy (all $\beta$s < |`r round(acc_LR_max_dilation@beta[2],2)`|, all $p$s > `r format_p(ref_acc_LR_max_dilation$coefficients[2,4])`). For trials presented from nonlinearly, mean or maximum dilation values at either phase did not predict accuracy ($\beta$s = `r round(acc_NL_mean_dilation@beta[2],2)`, $p$ `r format_p(ref_acc_NL_mean_dilation$coefficients[2,4])`).
+
+All models ran for the nonlinear trials also had a main effect of encoding order, such that participants were significantly less likely to remember items that were presented second (all $\beta$s > |`r round(mask_acc_NL_max_dilation@beta[3],2)`|, all $p$s < `r format_p(ref_mask_acc_NL_max_dilation$coefficients[3,4])`) or third (all $\beta$s > |`r round(acc_NL_max_dilation@beta[4],2)`|, all $p$s > `r format_p(ref_acc_NL_max_dilation$coefficients[4,4])`) in the nonlinear trials. For trials presented from left to right or right to left, there was no main effect of encoding order (all $\beta$s < |`r round(acc_RL_mean_dilation@beta[3],2)`|, all $p$s > `r format_p(ref_acc_RL_mean_dilation$coefficients[3,4])`)
+
+
+#3. Gaze location at retrieval
+## Rolling averages of gaze location:
+```{r gaze patterns by encoding position, echo=FALSE, include=FALSE, message=FALSE}
+# Using a "pre-decision" phase, for which for one second participants see a blank screen
+preDecision <- retrieval_phase %>%
+  filter(new_time > 3450, new_time < 4550)
+
+# Calculate rolling averages for gaze locations during this time
+retrieval_mean_gaze <- preDecision %>%
+  arrange(RECORDING_SESSION_LABEL, TRIAL_INDEX, new_time) %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX, encoding_position, encoding_order) %>%
+  mutate(
+    rolling_gaze_x = rollmean(LEFT_GAZE_X, k = 5, fill = NA, align = "center"),
+    rolling_gaze_y = rollmean(LEFT_GAZE_Y, k = 5, fill = NA, align = "center")
+  ) %>%
+  drop_na(rolling_gaze_x, rolling_gaze_y) %>%
+  ungroup() %>%
+  mutate(across(c(
+    encoding_position, encoding_order, is_correct, originTrialDir), as_factor),
+         encoding_position = factor(encoding_position, levels = c("L", "M", "R")))
+
+# Filter to only include the correct trials
+rolling_corr <- retrieval_mean_gaze %>% filter(is_correct == 1)
+
+summary(rolling_corr)
+```
+
+##Stats: Rolling Averages and gaze location by encoding order and position
+```{r corr gaze location by encoding order and position, echo=FALSE, include=FALSE, message=FALSE}
+# Taking the rolling x-axis locations for correctly recalled trials
+# 1. Mean gaze x by encoding order
+ret_meanx_order <- lmer(rolling_gaze_x~encoding_order + (1|RECORDING_SESSION_LABEL), 
+                        data = rolling_corr)
+
+ref_ret_meanx_order <- summary(ret_meanx_order)
+
+# 2. Mean gaze x by encoding position
+ret_meanx_location <- lmer(rolling_gaze_x~encoding_position + (1|RECORDING_SESSION_LABEL), 
+                           data = rolling_corr)
+
+ref_ret_meanx_location <- summary(ret_meanx_location)
+```
+**Gaze location at retrieval**
+Our second main question of interest explored whether participants’ gaze movements at retrieval suggested they spontaneously organized the temporal order of triplets in terms of a mental timeline. To answer this question, we analyzed the 1000 ms time window between the offset of the retrieval image and the onset of the answer options. We first examined participants’ gaze positions to assess whether the order or location of the retrieval image during encoding influenced gaze movements during successful retrieval trials. We then compared whether gaze patterns differed between trials with accurate and inaccurate retrieval. For both analyses, we calculated rolling averages of the x and y-coordinates of participants’ gaze using a five-point moving window via the zoo package (Zeileis & Grothendieck, 2005), which averaged five consecutive points over the target duration. We used these rolling averages to smooth fluctuations in the raw data and extract broader, systematic shifts in gaze movement. All gaze analyses were also conducted using raw gaze data and by calculating displacement between gaze positions at the start and end of the 1000 ms interval. Because all methods yielded similar patterns, only the rolling average analyses are reported here.
+
+***Encoding Order***
+We explored participants’ gaze movement for correct trials as a function of the temporal order in which the retrieval item appeared during the encoding phase (model syntax: rolling gaze x ~ encoding order + (1| subject_id). We found that the x-coordinate location of gaze position was influenced by encoding order, , such that relative to images presented first, participants looked more toward the right side of the screen for images presented second ($\beta$ = `r round(ret_meanx_order@beta[2],2)`,  $p$ `r format_p(ref_ret_meanx_order$coefficients[2,5])`). However, there was no difference for gaze location for images presented third ($\beta$ = `r round(ret_meanx_order@beta[3],2)`,  $p$ `r format_p(ref_ret_meanx_order$coefficients[3,5])`) (see Figure 6).
+
+***Encoding Position***
+ We explored participants’ gaze movement for correct trials as a function of the temporal order in which the retrieval item appeared during the encoding phase (model syntax: rolling gaze x ~ encoding location + (1| subject_id). We found that the x-coordinate location of the gaze position was influenced by encoding location, such that participants moved their gaze rightward when recalling retrieval images presented in the middle during encoding ($\beta$ = `r round(ret_meanx_location@beta[2],2)`,  $p$ `r format_p(ref_ret_meanx_location$coefficients[2,5])`) and for images presented on the right during encoding ($\beta$ = `r round(ret_meanx_location@beta[3],2)`,  $p$ `r format_p(ref_ret_meanx_location$coefficients[3,5])`), relative to images that were presented on the left. 
+
+##Stats: Accuracy comparison of gaze location by encoding order and position
+```{r retrieval gaze location by encoding order and position, echo=FALSE, include=FALSE, message=FALSE}
+# Ensure factors are set correctly
+retrieval_mean_gaze <- retrieval_mean_gaze %>%
+  mutate(
+    encoding_position = factor(encoding_position, levels = c("L", "M", "R")),
+    encoding_order = as.factor(encoding_order),
+    is_correct = as.factor(is_correct))
+
+# Encoding order × accuracy on rolling gaze x
+acc_meanx_order <- lmer(rolling_gaze_x ~ encoding_order * is_correct + (1|RECORDING_SESSION_LABEL),
+                        data = retrieval_mean_gaze)
+ref_acc_meanx_order <- summary(acc_meanx_order)
+
+# 2. Encoding location × accuracy on rolling gaze x
+acc_meanx_location <- lmer(rolling_gaze_x ~ encoding_position * is_correct + (1|encoding_order) + (1|RECORDING_SESSION_LABEL), data = retrieval_mean_gaze)
+ref_acc_meanx_location <- summary(acc_meanx_location)
+```
+***Accuracy and Gaze Location***
+Finally, we explored whether the correct retrieval of the temporal order of the retrieval item was related to participants’ eye movements. We first explored whether gaze patterns differed between correct and incorrect trials, as a function of encoding order (model syntax: rolling gaze x ~ encoding order * correct answer + (1| subject_id)). There was an interaction between accuracy and encoding order, such that participants were more likely to move their gaze rightward for retrieval images that were presented second and answered correctly relative to incorrectly ($\beta$ = `r round(acc_meanx_order@beta[5],2)`,  $p$ `r format_p(ref_acc_meanx_order$coefficients[5,5])`) but not for retrieval images that were presented third and answered correctly ($\beta$ = `r round(acc_meanx_order@beta[6],2)`,  $p$ `r format_p(ref_acc_meanx_order$coefficients[6,5])`).
+
+Next, we explored whether gaze patterns differed between correct and incorrect trials, as a function of encoding location (model syntax: rolling gaze x ~ encoding location * correct response + (1| subject_id). There was also an interaction between accuracy and encoding location, such that participants were more likely to move their gaze rightward for retrieval images that were presented in the middle and answered correctly ($\beta$ = `r round(acc_meanx_location@beta[5],2)`,  $p$ `r format_p(ref_acc_meanx_location$coefficients[5,5])`) and for retrieval images that were presented on the right and answered correctly ($\beta$ = `r round(acc_meanx_location@beta[6],2)`,  $p$ `r format_p(ref_acc_meanx_location$coefficients[6,5])`)
+
+##Visualize: Accuracy and Gaze Location
+```{r plots for accuracy and gaze-x, echo=FALSE, include=FALSE, message=FALSE}
+# Check what the gaze location distribution
+summary(retrieval_mean_gaze$rolling_gaze_x)
+
+# 640 px is technically the middle of the screen, but the median gaze location is at 650 which is where I am drawing the plot line
+
+# Encoding order and accuracy
+gaze_acc_order <- ggplot(
+  data = retrieval_mean_gaze %>%
+    filter(!is.na(rolling_gaze_x), 
+           !is.na(new_time), 
+           !is.na(RECORDING_SESSION_LABEL), 
+           !is.na(encoding_order),
+           !is.na(is_correct)) %>%  # make sure is_correct is not NA
+    group_by(new_time, encoding_order, is_correct) %>%
+    summarize(average_gaze_x = mean(rolling_gaze_x, na.rm = TRUE), .groups = "drop"), 
+  aes(x = new_time, y = average_gaze_x, color = encoding_order, group = encoding_order)
+) +
+  geom_line(alpha = 0.7) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(
+    title = "Gaze X Order of Retrieval Trials",
+    x = "Time (ms)",
+    y = "Average Gaze X (pixels)",
+    color = "Encoding Order"
+  ) +
+  facet_wrap(~is_correct, labeller = as_labeller(c(`0` = "Incorrect", `1` = "Correct"))) + 
+  scale_color_manual(values = c("#d95f02", "#1b9e77", "#7570b3")) +
+  geom_hline(yintercept=650, linetype="dashed", color = "red") +
+  annotate("text", x=4000, y=670 , label = "More left", size = 4) + 
+  annotate("text", x=4000, y=630 , label = "More right", size = 4) + 
+  ylim(630,670) + theme_Publication()
+
+# Encoding position and accuracy
+gaze_acc_position <- ggplot(
+  data = retrieval_mean_gaze %>%
+    filter(!is.na(rolling_gaze_x), 
+           !is.na(new_time), 
+           !is.na(RECORDING_SESSION_LABEL), 
+           !is.na(encoding_position),
+           !is.na(is_correct)) %>%  # make sure is_correct is not NA
+    group_by(new_time, encoding_position, is_correct) %>%
+    summarize(average_gaze_x = mean(rolling_gaze_x, na.rm = TRUE), .groups = "drop"), 
+  aes(x = new_time, y = average_gaze_x, color = encoding_position, group = encoding_position)
+) +
+  geom_line(alpha = 0.7) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(
+    title = "Gaze X Location of Retrieval Trials",
+    x = "Time (ms)",
+    y = "Average Gaze X",
+    color = "Encoding Position"
+  ) +
+  facet_wrap(~is_correct, labeller = as_labeller(c(`0` = "Incorrect", `1` = "Correct"))) + 
+  scale_color_manual(values = c("#d95f02", "#1b9e77", "#7570b3")) +
+  geom_hline(yintercept=650, linetype="dashed", color = "red") +
+  annotate("text", x=4000, y=670 , label = "More left", size = 4) + 
+  annotate("text", x=4000, y=630 , label = "More right", size = 4) + 
+  ylim(630,670) +
+  theme_Publication()
+```
+# 4. Exploratory Analyses: Internal Representations, Strategy, and Recall
+#Clean and reshape data
+```{r data reshaping and cleaning, echo=FALSE, include=FALSE, message=FALSE}
+# Load IRQ data, participant information, and recall data
+raw_IRQ <- read.csv(here("Analysis/TG_IRQ_only.csv"))
+
+# Remove TG_, TG- prefixes
+raw_IRQ$Participant_ID <- gsub("^TG[_-]", "", raw_IRQ$Participant_ID) 
+raw_IRQ$Participant_ID <- str_trim(raw_IRQ$Participant_ID)
+raw_IRQ$Participant_ID <- as.character(raw_IRQ$Participant_ID)
+
+included_participants <- read.csv(here("Analysis/csv_output/included_participants.csv"), row.names = 1)
+
+# Filter only included participants
+IRQ_included <- raw_IRQ %>%
+  filter(Participant_ID %in% included_participants$Participant_ID)
+
+recall_data <- read.csv(here("Analysis/csv_output/all_recall_clean.csv"), row.names = 1)
+
+# Reshape to long format and define IRQ factors
+IRQ_data_clean <- IRQ_included %>%
+  pivot_longer(Q1:Q30, names_to="Q", values_to="rating") %>%
+  mutate(
+    Q_num = as.integer(str_extract(Q, "\\d+")),   # Extract number from "Q1" etc.
+    IRQ_factor = case_when(
+      Q_num >= 1  & Q_num <= 10 ~ "visual_imagery",
+      Q_num >= 11 & Q_num <= 20 ~ "verbal_representations",
+      Q_num >= 21 & Q_num <= 30 ~ "mental_manipulation",
+      TRUE ~ NA_character_  # fallback if something else appears
+    ),
+    rating = as.numeric(rating),
+    IRQ_factor = as.factor(IRQ_factor)
+  ) %>%
+  select(-Q_num)
+
+# Participant-level and group-level averages
+IRQ_sub_averages <- IRQ_data_clean %>%
+  group_by(Participant_ID, IRQ_factor) %>%
+  summarize(avg_rating = mean(rating, na.rm = TRUE), .groups = "drop")
+
+IRQ_group_averages <- IRQ_data_clean %>%
+  group_by(IRQ_factor) %>%
+  summarize(avg_rating = mean(rating, na.rm = TRUE), .groups = "drop")
+
+# Get trial-level accuracy data:
+recall_data <- rename(recall_data, Participant_ID = RECORDING_SESSION_LABEL) %>%
+  filter(Participant_ID %in% IRQ_sub_averages$Participant_ID)
+
+# Pivot to wide format for merging
+IRQ_wide <- IRQ_sub_averages %>%
+  pivot_wider(names_from = IRQ_factor, values_from = avg_rating) %>%
+  mutate(Participant_ID = as.factor(Participant_ID))
+
+# Merge data frames
+recall_IRQ_combined <- merge(recall_data, IRQ_wide, by = "Participant_ID") %>%
+  select(
+    Participant_ID, TRIAL_INDEX, originTrialDir, mental_manipulation,
+    verbal_representations, visual_imagery, encoding_order, encoding_position,
+    orderResponse, is_correct
+  ) %>%
+  mutate(
+    across(c(Participant_ID, originTrialDir, encoding_order, encoding_position, orderResponse), as.factor),
+    mental_c = mental_manipulation - mean(mental_manipulation, na.rm = TRUE), #'center' scores for the IRQ factors
+    verbal_c = verbal_representations - mean(verbal_representations, na.rm = TRUE),  
+    visual_c = visual_imagery - mean(visual_imagery, na.rm = TRUE), 
+    originTrialDir = relevel(originTrialDir, ref = "LR") # set reference level for original trial direction
+  )
+
+# Look at the distributions
+IRQ_dist <- recall_IRQ_combined %>%
+  group_by(Participant_ID) %>%
+  slice(head(1)) %>%
+  select(-c("TRIAL_INDEX", "originTrialDir", "encoding_order", "encoding_position", "orderResponse", "is_correct"))
+
+length(unique(IRQ_dist$Participant_ID))
+```
+#Strategy use data
+```{r self resported strategy use, echo=FALSE, warning=FALSE, include=FALSE}
+#for knitting
+strategy_data <- read.csv(here("Analysis/TG_Strategy.csv"))
+
+strategy_data$Participant_ID <- gsub("^TG[_-]", "", strategy_data$Participant_ID)
+
+strategy_data <- strategy_data %>%
+  filter(Participant_ID %in% included_participants$Participant_ID & Strategy == 1) # Only participants who used strategy
+
+# Basic summary
+strategy_summary <- strategy_data %>%
+  summarize(
+    n_verbal  = sum(as.numeric(s_verbal), na.rm = TRUE),
+    n_spatial = sum(as.numeric(s_spatial), na.rm = TRUE),
+    n_both    = sum(as.numeric(s_both), na.rm = TRUE),
+    n_neither = sum(as.numeric(s_neither), na.rm = TRUE),
+    beginning    = sum(StrategyTime == 1, na.rm = TRUE),
+    before_break = sum(StrategyTime == 2, na.rm = TRUE),
+    after_break  = sum(StrategyTime == 3, na.rm = TRUE)
+  )
+```
+**Exploratory analyses**
+***Self-reported strategy use***
+*N* = `r length(unique(strategy_data$Participant_ID))` participants indicated that they used a strategy during the task. Most participants reported using a strategy either right at the beginning of the task (*n* = `r strategy_summary$beginning`) or during the first encoding block (*n* = `r strategy_summary$before_break`). Half of the participants reported using only a verbal strategy (n = `r strategy_summary$n_verbal`) (e.g., "I just repeated the order in my head (ex: pan-right, lady bug_middle, tree_left"). Next most common report was a mix of verbal and spatial strategies (n = `r strategy_summary$n_both`)  (e.g., *“I tried to say the words in my head and repeat them so I could remember the order, as well as following with my eyes the original order that I saw*”). Two participant reported using only a spatial strategy (e.g., “*Going from left to right or right to left each time even if the first image appeared on the middle of the screen. That way I could orient the object order in my mind no matter when and where objects popped up on the screen*”) and three participants reported vague strategies that did not fit in either category (e.g., "*Remember the first and last one*").
+
+## Strategy X Recall
+```{r strategy and recall, echo=FALSE, message=FALSE, include=FALSE}
+recall_IRQ_strat <- strategy_data %>%
+  select(-c(StrategyTime, StrategyDescription)) %>%
+  left_join(
+    recall_IRQ_combined,
+    by = "Participant_ID"
+  ) %>%
+  # Ensure all relevant columns are numeric
+  mutate(
+    across(c(s_verbal, s_spatial, s_both, s_neither, verbal_c, visual_c), as.numeric)
+  ) %>%
+    select(-c("Strategy", "mental_manipulation", "verbal_representations", "visual_imagery")) %>%
+  mutate(across(
+    c(Participant_ID, originTrialDir, encoding_order, encoding_position, orderResponse), 
+    as.factor))
+
+# Group strategies to be one column
+recall_IRQ_strat <- recall_IRQ_strat %>%
+  mutate(strategy_type = 
+           case_when(
+             s_verbal == 1 ~ "s_verbal",
+             s_both == 1 ~ "s_both",
+             TRUE ~ "other"
+           ))
+
+recall_IRQ_strat$strategy_type <- as.factor(recall_IRQ_strat$strategy_type)
+```
+## Is the interaction between trial direction and accuracy predicted by strategy use?
+##Stats: strategy x accuracy x trial direction
+```{r stats for strat x accuracy x trial direction, echo=FALSE, message = FALSE, include=FALSE}
+# 1. Does strategy type predict the interaction between accuracy and trial direction?
+# For participants who used a verbal only or mixed strategy:
+accuracy_by_strat <- recall_IRQ_strat %>%
+  filter(strategy_type!= "other")
+
+# also drop the level
+accuracy_by_strat$strategy_type <- droplevels(accuracy_by_strat$strategy_type)
+
+
+acc_strategy_dir <- glmer(is_correct ~ originTrialDir * strategy_type +(1|Participant_ID),
+                                family = binomial(link = "logit"), 
+                       control = glmerControl(optimizer="bobyqa"),
+                                data = accuracy_by_strat)
+ref_acc_strategy_dir <- summary(acc_strategy_dir)
+```
+***Strategy use and behavioral accuracy***
+We first explored whether participants' self-reported strategy use interacted with their accuracy for different trial directions. Because few participants used a spatial-only or vague strategy, we explored the effects of using a verbal-only strategy and a mix of verbal and spatial strategies (model syntax for each strategy type: correct answer ~ trial direction * strategy_type + (1| subject_id). Participants who reported using only a verbal strategy had lower accuracy for trials presented from right-to-left ($\beta$ = `r round(acc_strategy_dir@beta[6],2)`, $p$ `r format_p(ref_acc_strategy_dir$coefficients[6,4])`) and nonlinearly ($\beta$ = `r round(acc_strategy_dir@beta[5],2)`, $p$ `r format_p(ref_acc_strategy_dir$coefficients[5,4])`) relative to participants who did not report only using a verbal strategy. Using a mix of verbal and spatial strategies however, did not interact with behavioral accuracy (all $\beta$s < |`r round(acc_strategy_dir@beta[6],2)`|, all $p$s > `r format_p(ref_acc_strategy_dir$coefficients[6,4])`) 
+
+#IRQ factors
+## Are IRQ scores correlated?
+```{r visual and verbal IRQ scores correlation, echo=FALSE, include=FALSE, message=FALSE}
+# Extract relevant centered IRQ scores 
+corr_df <- IRQ_dist %>%
+  ungroup() %>%
+  select(visual_c, verbal_c, mental_c) %>%
+  mutate(across(everything(), as.numeric))
+
+# Spearman correlation matrix (visual scores are not normally distributed)
+irq_cor_results <- psych::corr.test(corr_df %>% select(visual_c, verbal_c, mental_c), 
+                 method = "spearman", 
+                 use = "pairwise")
+
+print(irq_cor_results, short = FALSE)
+```
+
+## Strategy X IRQ
+```{r strategy and IRQ, echo=FALSE, echo=FALSE, include=FALSE, message=FALSE}
+# Smaller dataframe because we don't need trial-level information
+IRQ_and_strategy <- accuracy_by_strat %>%
+  group_by(Participant_ID) %>%
+  slice(head(1)) %>%
+  select(c(Participant_ID, mental_c, verbal_c, visual_c, strategy_type))
+```
+### Stats: Strategy use and IRQ factor scores
+```{r strategy use and IRQ scores, echo=FALSE, include=FALSE, message=FALSE}
+# Logistic regression: strategy relate to IRQ scores?
+IRQ_strat <- glm(strategy_type ~ verbal_c + visual_c + mental_c, data = IRQ_and_strategy, family = binomial)
+ref_IRQ_strat <- summary(IRQ_strat)
+```
+***Strategy use and IRQ factor scores***
+Next, we explored whether participants’ Internal Representations Questionnaire factor scores predicted their strategy type (model syntax: strategy type ~ internal verbalization scores + visual imagery scores + representational manipulation scores). Similar to the previous analysis, we explored how the factors scores relate to using verbal-only strategy versus a mix of verbal and spatial strategies. Overall, participants who had higher internal verbalization scores were more likely to report using a verbal only strategy relative to a mix of verbal and spatial strategies ($\beta$ = `r round(ref_IRQ_strat$coefficients[2,1],2)`, $p$ `r format_p(ref_IRQ_strat$coefficients[2,4])`). Visual imagery and representational manipulation factors did not predict strategy use (all $\beta$s < `r round(ref_IRQ_strat$coefficients[3,1],2)`, all $p$s > `r format_p(ref_IRQ_strat$coefficients[3,4])`). Importantly, there was a significant positive correlation between Visual Imagery and Representational Manipulation scores ($\rho$(30) =`r round(irq_cor_results$r["visual_c", "mental_c"],2)`, $p$ `r format_p(irq_cor_results$p["visual_c", "mental_c"])`). 
+## Is the interaction between trial direction and accuracy predicted by internal representations?
+##Stats: IRQ x accuracy x trial direction
+```{r stats for IRQ x accuracy x trial direction, echo=FALSE, include=FALSE, message=FALSE}
+# 1. Do Internal Verbalization scores predict the interaction between accuracy and trial direction?
+verbal_representations <- glmer(is_correct ~ originTrialDir * verbal_c + visual_c + mental_c +(1|Participant_ID),
+                                family = binomial(link = "logit"), control =glmerControl(optimizer="bobyqa"),
+                                data = recall_IRQ_combined)
+ref_ver_rep <- summary(verbal_representations)
+
+# Visualize the interaction
+plot_model(verbal_representations, type = "int", 
+           terms = c("originTrialDir", "verbal_c"))
+
+# 2. Do visual imagery  scores predict the interaction between accuracy and trial direction?
+visual_imagery <- glmer(is_correct ~ originTrialDir * visual_c + verbal_c + mental_c + (1|Participant_ID), 
+                       family = binomial(link = "logit"), control = glmerControl(optimizer="bobyqa"), 
+                       data = recall_IRQ_combined)
+ref_vis_img <- summary(visual_imagery)
+
+# Visualize model
+plot_model(visual_imagery, type = "int", 
+           terms = c("originTrialDir", "visual_c"))
+
+# 3. Do Representational Manipulation scores predict the interaction between accuracy and trial direction?
+mental_manipulation <- glmer(is_correct ~ originTrialDir * mental_c + verbal_c + visual_c +(1|Participant_ID), 
+                       family = binomial(link = "logit"), control = glmerControl(optimizer="bobyqa"), 
+                       data = recall_IRQ_combined)
+ref_ment_man <- summary(mental_manipulation)
+
+# Visualize model
+plot_model(mental_manipulation, type = "int", 
+           terms = c("originTrialDir", "mental_c"))
+```
+
+## Do participant's mistakes reveal why the behavioral results interact with the IRQ factors?
+```{r mistakes by IRQ, echo=FALSE, include=FALSE, message=FALSE}
+# Do IRQ scores interact with mistakes on the congruent versus incongruent trials?
+# Get accuracy for each trial type (congruent vs incongruent with the MTL) per participant, and calculate the difference in accuracy
+IRQ_mistakes <- recall_IRQ_combined %>%
+  mutate(trial_type = case_when(
+    originTrialDir == "LR" ~ "congruent",
+    originTrialDir %in% c("RL", "NL") ~ "incongruent"
+  )) %>%
+  group_by(Participant_ID, trial_type, verbal_c, visual_c, mental_c) %>%
+  summarise(
+    n_total = n(),
+    n_mistakes = sum(is_correct == 0),
+    prop_mistakes = n_mistakes / n_total,
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    id_cols = c(Participant_ID, verbal_c, visual_c, mental_c),
+    names_from = trial_type,
+    values_from = prop_mistakes,
+    names_prefix = "prop_"
+  ) %>%
+  mutate(
+    diff_mistake = prop_incongruent - prop_congruent # positive values mean they make more mistakes in the incongruent trials
+  )
+
+# Do IRQ scores interact with mistakes on the congruent versus incongruent trials?
+mistakes_prop <- lm(diff_mistake ~ verbal_c + visual_c, data = IRQ_mistakes)
+ref_mistakes_prop <- summary(mistakes_prop)
+```
+***IRQ scores and behavioral accuracy***
+Next, we explored whether the interaction between trial direction and behavioral accuracy was predicted by the Internal Representations Questionnaire factor scores. We ran a model for each factor as the interaction term and the other two factor scores as fixed effects (example model syntax: correct response ~ trial direction * internal verbalization + visual representation + representational manipulation + (1|subject_id)). 
+
+Overall, internal verbalization scores did not influence participants' memory accuracy ($\beta$ = `r round(verbal_representations@beta[4],2)`, $p$ `r format_p(ref_ver_rep$coefficients[4,4])`). However, there was an interaction between internal verbalization scores, trial direction and accuracy such that participants with higher internal verbalization scores showed a greater decrease in accuracy on nonlinear trials ($\beta$ = `r round(verbal_representations@beta[7],2)`, $p$ `r format_p(ref_ver_rep$coefficients[7,4])`) relative to those with lower scores.
+
+There was a main effect of visual imagery scores on participants' memory accuracy, such that participants who reported higher visual imagery scores  had lower memory accuracy relative to those who reported lower scores ($\beta$ = `r round(visual_imagery@beta[4],2)`, $p$ = `r format_p(ref_vis_img$coefficients[4,4])`). The visual imagery scores did not interact with accuracy and on any particular trial direction (all $\beta$s < |`r round(visual_imagery@beta[7],2)`|,all $p$s > `r format_p(ref_vis_img$coefficients[7,4])`)
+
+Representational manipulation scores did not predict overall memory accuracy or interact with accuracy and trial directions and were not included in the subsequent analyses (all $\beta$s < |`r round(mental_manipulation@beta[4],2)`|,all $p$s > `r format_p(ref_ment_man$coefficients[4,4])`)
+To further explore how Internal Representations Questionnaire factor scores interact with the online use of the mental timeline during memory retrieval we explored participants' proportion of incorrect responses for images coming from congruent (left-to-right) and incongruent (right-to-left, nonlinear) encoding trials, and calculated the difference between their proportion of incorrect responses for congruent and incongruent trials. We then explored whether Internal Representations Questionnaire scores interacted with their proportions of incorrect responses in congruent and incongruent trials (model syntax: difference in the proportion of mistakes ~ internal verbalization scores + visual imagery scores). This analysis confirmed that participants with higher internal verbalization scores were overall more likely to make more errors in the incongruent trials relative to congruent trials ($\beta$ = `r round(ref_mistakes_prop$coefficients[2,1],2)`, $p$ `r format_p(ref_both_strat$coefficients[2,4])`), however, visual respresentation scores did not influence the proportion of errors for the congruent and incongruent trials ($\beta$ = `r round(ref_mistakes_prop$coefficients[3,1],2)`, $p$ `r format_p(ref_both_strat$coefficients[3,4])`).

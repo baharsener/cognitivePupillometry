@@ -1,0 +1,1066 @@
+---
+title: "Data cleaning script for `Adults use the mental timeline as a memory strategy`"
+author: "Anonymous contributor"
+output: html_document
+date: "2025-01-08"
+editor_options: 
+  chunk_output_type: console
+---
+#Setup 
+Loading packages and defining functions
+```{r setup, echo=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# ==== PATH SETUP ====
+# Uncomment the version that works on your system:
+#base_dir <- "."
+
+# Load packages
+library(tidyverse); library(PupillometryR); library(here); library(dplyr); library(data.table); library(janitor); library(pracma); library(stringr); library(ggplot2); library(ggfittext); library(zoo); library(lme4); library(lmerTest); library(sjPlot)
+
+# Set custom functions
+# Function to format the RECORDING_SESSION_LABEL id's from the behavioral data to match the format of the eye tracker data, this removes the date info
+extract_id <- function(label) {
+  id_part <- str_extract(label, "(?<=_)\\d+(?=_)") # Extract the numeric part
+  return(as.numeric(id_part)) # Convert to numeric before returning
+}
+
+# A function to find the "origin" encoding trial number and trial direction for each retrieval image
+find_origin_encoding_trials <- function(data) {
+  # Initialize the columns
+  data$originEncodingTrial <- NA
+  data$originTrialDir <- NA
+  
+  # Go through each row to check against all triplet columns in the entire dataset
+  for (i in seq_len(nrow(data))) {
+    if (!is.na(data$retrievalImage[i])) {  # Only process retrieval trials
+      img <- data$retrievalImage[i]
+      
+      # Check for matches in all of the values of the columns in that block
+      matching_rows <- which(data$triplet1 == img | data$triplet2 == img | data$triplet3 == img)
+      
+      if (length(matching_rows) > 0) {
+        # Grab the eTrials value for the first match
+        data$originEncodingTrial[i] <- data$TRIAL_INDEX[matching_rows[1]]
+        
+        # Also grab the trialDirection of the matched encoding trial
+        data$originTrialDir[i] <- data$trialDirection[matching_rows[1]]
+      }
+    }
+  }
+  
+  return(data)
+}
+
+# Function to format p-values in APA style
+format_p <- function(pval) {
+  if (!is.numeric(pval)) stop("pval must be numeric")
+  sapply(pval, function(p) {
+    if (is.na(p)) return(NA_character_)
+    if (p < .001) {
+      " < .001"
+    } else if (p < .01) {
+      paste0(" = ", stringr::str_remove(format(round(p, 3), nsmall = 3), "^0"))
+    } else {
+      paste0(" = ", stringr::str_remove(format(round(p, 2), nsmall = 2), "^0"))
+    }
+  })
+}
+
+# Combine two data frames while preseving all columns
+rbind.all.columns <- function(x, y) {
+  x.diff <- setdiff(colnames(x), colnames(y))
+  y.diff <- setdiff(colnames(y), colnames(x))
+  x[, c(as.character(y.diff))] <- NA
+  y[, c(as.character(x.diff))] <- NA
+  return(rbind(x, y))
+}
+
+# ggplot theme for plots
+theme_Publication <- function(base_size=18, base_family="Helvetica") {
+  ggthemes::theme_foundation(base_size=base_size, base_family=base_family) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = ggplot2::rel(1.2), hjust = 0.5),
+      text = ggplot2::element_text(),
+      panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+      plot.background = ggplot2::element_rect(fill = "white", colour = NA),
+      panel.border = ggplot2::element_blank(),
+      axis.title = ggplot2::element_text(face = "bold", size = ggplot2::rel(1)),
+      axis.title.y = ggplot2::element_text(angle = 90, vjust = 2),
+      axis.title.x = ggplot2::element_text(vjust = -0.2),
+      axis.line = ggplot2::element_line(colour = "black"),
+      axis.ticks = ggplot2::element_line(),
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      legend.position = "right",
+      legend.direction = "vertical",
+      legend.key.size = grid::unit(0.8, "cm"),
+      legend.title = ggplot2::element_text(face = "bold", size = ggplot2::rel(0.8)),
+      legend.key = ggplot2::element_rect(colour = NA),
+      plot.margin = grid::unit(c(10,5,5,5), "mm"),
+      # keep facet header gray
+      strip.background = ggplot2::element_rect(fill = "#f0f0f0", colour = "#f0f0f0"),
+      strip.text = ggplot2::element_text(face = "bold"),
+      panel.spacing = grid::unit(1, "lines")
+    )
+}
+```
+
+#1. Exclusion
+
+### First excluding participants based on factors such as technical errors. Just checking the participant sheet to see if we made notes to exclude them. 
+```{r exclusion first pass, echo=FALSE, include=FALSE, message=FALSE}
+participants <- read.csv(here("TG_ParticipantSheet.csv"))
+excluded_p <- subset(participants, Exclude == "Yes")
+participants <- subset(participants, Exclude != "Yes")
+```
+### For the rest of the participants, mark those who answered 10% or more of the attention check questions incorrectly (more than 2)
+```{r exclusion second pass, echo=FALSE, include=FALSE, message=FALSE}
+filePath <- here("Data/sample_reports")
+filtered_file_list <- list.files(filePath, pattern = "\\.csv$", full.names = TRUE)
+
+#Make a list of file names to check for exclusion
+filtered_file_list <- filtered_file_list[
+  unlist(sapply(filtered_file_list, function(x) {
+    Participant_ID <- str_extract(x, "\\d+")
+    Participant_ID %in% participants$Participant_ID
+  }))
+]
+ 
+# Initialize an empty list to store valid file paths
+valid_files <- c()
+method_results <- list() #to store participant-level accuracy for the catch trials
+
+# Loop through each file
+for (filename in filtered_file_list) {
+  subFile <- here(filename) # Get file name/location
+  subd <- read.csv(subFile) # Read in subject csv
+  
+  # Extract participant ID from the filename
+  participant_id <- str_extract(filename, "Participant[0-9]+")
+  
+  # Check accuracy using the methodCheck column
+  subd <- subd %>%
+    filter(trial_category == "encoding") %>%
+    filter(methodCheck != "UNDEFINED") %>%
+    filter(methodCheck != ".") %>%
+    group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+    summarize(attentionScore = mean(as.numeric(methodCheck), na.rm = TRUE)) %>%
+    summarize(attentionScore = mean(attentionScore)) %>%
+    mutate(
+      attentionCheck = case_when(
+        attentionScore >= 0.9 ~ "pass",
+        attentionScore < 0.9 ~ "fail",
+        TRUE ~ "check"
+      ))
+  # Add the results to the list
+  method_results[[filename]] <- subd
+  
+  # Check if the participant passed the attention check
+  if ("pass" %in% subd$attentionCheck) {
+    valid_files <- c(valid_files, filename)
+  }
+}
+
+# Make 'method check' results into a dataframe
+method_results <- do.call(rbind, method_results)
+
+# Check which ones are with valid files
+method_passed <- method_results %>%
+  filter(attentionCheck == "pass")
+
+# Who failed the attention check questions
+method_fail <- method_results %>%
+  filter(attentionCheck != "pass")
+
+# Filter out the ones who failed
+filtered_file_list <- rownames(method_passed)
+
+# Save included participants for fixation reports as well:
+method_passed$RECORDING_SESSION_LABEL <- as.character(extract_id(method_passed$RECORDING_SESSION_LABEL))
+
+# Remove the participants who failed the attention check from the final participant list
+participants <- participants %>%
+  filter(Participant_ID %in% method_passed$RECORDING_SESSION_LABEL)
+
+# Save final participant list
+write.csv(participants,(here("Analysis/csv_output/included_participants.csv")))
+```
+#2. Get demographic information 
+```{r demograpics, echo=FALSE, include=FALSE, message=FALSE}
+demo_info <- read.csv(here("Analysis/AdultDemographics.csv"))
+participants <- read.csv(here("Analysis/csv_output/included_participants.csv"))
+
+participant_info <- participants %>%
+  summarise(
+    m_age = mean(Age, na.rm = TRUE),
+    min_age = min(Age, na.rm = TRUE),
+    max_age = max(Age, na.rm = TRUE)
+  ) %>%
+  bind_cols(
+    participants %>%
+      count(Sex) %>%
+      pivot_wider(names_from = Sex, values_from = n, values_fill = 0)
+  ) %>%
+  bind_cols(
+    participants %>%
+      count(Recruitment.source) %>%
+      pivot_wider(names_from = Recruitment.source, values_from = n, values_fill = 0)
+  )
+
+participant_info <- clean_names(participant_info)
+
+demo_info$Participant_ID <- as.integer(str_extract_all(demo_info$Participant_ID, "\\d+"))
+demo_info <- demo_info  %>%
+  filter(Participant_ID %in% participants$Participant_ID)
+
+colnames(demo_info) <- c("firstLang", "percent_eng", "other_lang", "other_lang2", "age", "sex", "race",  "edu", "parent_edu", "parent_edu_text", "parent2_edu", "parent2_edu_text", "income", "parent_income", "household_size_current", "household_size_childhood", "Participant_ID")
+
+# How many people speak English as a first language and how many speak another?
+lang_summary <- demo_info %>%
+  summarise(
+    first_eng = sum(grepl("English", firstLang, ignore.case = TRUE), na.rm = TRUE),
+    other_lang = sum(!is.na(`other_lang`) & `other_lang` != "", na.rm = TRUE)
+  )
+
+race_summary <- demo_info %>%
+  mutate(race_category = case_when(
+    race == "Asian" ~ "Asian",
+    race == "White" ~ "White",
+    race == "African or African American" ~ "African_American",
+    TRUE ~ "Multiracial"   # acts as ELSE
+  )) %>%
+  count(race_category) %>%
+  pivot_wider(names_from = race_category, values_from = n, values_fill = 0)
+```
+**Participants**
+The final sample included `r length(unique(participants$Participant_ID))` participants (M = `r round(participant_info$m_age,2)` years, range: `r participant_info$min_age` – `r participant_info$max_age` years, n = `r participant_info$f` female, n = `r participant_info$m` male, n = `r participant_info$nb` non-binary). Data from two additional participants were excluded due to participants not following instructions (n = `r length(unique(excluded_p$Participant_ID))`) or answering more than 10% of the attention check questions incorrectly (n =  `r length(method_fail$RECORDING_SESSION_LABEL)`). Data from one participant includes only one block, due to technical difficulties during the second block of the experiment. All included participants filled out a demographic information form. Participants described their racial-ethnic identities as: White (n = `r race_summary$White`), Multiracial (n = `r race_summary$Multiracial`), Asian (n = `r race_summary$Asian`), and African American (n = `r race_summary$African_American`). Most participants spoke English as their first language (n = `r lang_summary$first_eng`), and more than half (n = `r lang_summary$other_lang`) spoke more than one language.
+
+Participants were recruited from the University of Washington’s Research Participant Pool (n = `r participant_info$prp`) and through emails within the University of Washington (n = `r participant_info$paid_participant`). Participants recruited through the Research Participant Pool received class credit, and participants recruited via email received an $8 digital gift card. Participants provided verbal and written consent prior to participation. All informed consent and data collection procedures were approved by the University of Washington Institutional Review Board.
+
+
+#3. Sample data
+###Import and clean raw data:
+This chunk loads the data, goes through each participant to set trial direction, smooth and interpolate the data, identify missing data, clean up and fill sample messages, set the timestamps to 0 at the beginning of each trial. Also removes the trials for which participants did not answer the same/different questions correctly. 
+```{r clean sample data, echo=FALSE, include=FALSE, maessage=FALSE}
+# Get included participants
+participants <- read.csv(here("Analysis/csv_output/included_participants.csv"))
+
+filePath <- here("Data/sample_reports")
+filtered_file_list <- list.files(filePath, pattern = "\\.csv$", full.names = TRUE)
+
+# Make a list of file names to import the data
+filtered_file_list <- filtered_file_list[
+  unlist(sapply(filtered_file_list, function(x) {
+    Participant_ID <- str_extract(x, "\\d+")
+    Participant_ID %in% participants$Participant_ID
+  }))
+]
+
+# Giant loop to make all pupil data into one df, has code from the PupillometryR tutorial
+new_time_clean <- data.frame()  # Initialize outside the loop
+all_data <- data.frame()  #
+all_missing <- data.frame()  
+incorrect_method <- data.frame() 
+removed_time_trials <- data.frame()
+
+for (filename in filtered_file_list) {
+  subFile <- here(filename) # Get file name/location
+  subd <- read.csv(subFile) # Read in sub csv
+  print(paste("Processing file:", filename, "with rows:", nrow(subd)))
+
+  # Clean eye data
+  subd <- subd %>% select(RECORDING_SESSION_LABEL:TRIAL_START_TIME)  # select columns you are interested in (everything in between these two)
+  # Make pupil size numeric 
+  subd$LEFT_PUPIL_SIZE = as.numeric(as.character(subd$LEFT_PUPIL_SIZE)) 
+  # Extract participant id
+  subd$RECORDING_SESSION_LABEL <- as.character(extract_id(subd$RECORDING_SESSION_LABEL))
+  # Get rid of 'diff' encoding trials because we already excluded the participants who performed below chance (we don't measure memory accuracy for 'diff' trials)
+  subd <- subd %>% 
+    filter(encodingType != "diff")  
+  print(paste("Rows after filtering 'diff':", nrow(subd))) # Check that only appropriate number of rows are being removed here
+  incorrect <- subd %>% 
+    filter(methodCheck == 0)
+  # I also want to get rid of trials for which participants did not answer the method (same/different) question correctly:
+   subd <- subd %>% 
+    filter(methodCheck != 0)
+  print(paste("Rows after filtering 'methodCheck':", nrow(subd)))
+  
+  # Set trial direction
+  subd <- subd %>%
+    mutate(trialDirection = case_when(
+      trialType == "LMR" ~ "LR",
+      trialType == "RML" ~ "RL",
+      trialType == "RLM" ~ "NL",
+      trialType == "LRM" ~ "NL",
+      trialType == "MRL" ~ "NL",
+      trialType == "MLR" ~ "NL",
+      TRUE ~ NA
+    )) # TRUE ~ "NL" was setting blanks as NL, so make sure they are NA 
+
+  subd_pup <- subd
+  # Ensure 'message' column is not a list
+  subd_pup$message <- unlist(subd_pup$message)
+
+  # Plot pupil size by recording session
+  ggplot(subd_pup, aes(x = TIMESTAMP, y = LEFT_PUPIL_SIZE, color = RECORDING_SESSION_LABEL)) +
+    geom_point() +
+    labs(title = "Pupil Size by Recording Session", x = "Time", y = "Pupil Size") +
+    theme_minimal()
+
+  # Put the data into pupillometryR format for further analysis:
+  # Smooth/interpolate pupil data
+  Sdata <- make_pupillometryr_data(data = subd_pup, subject = RECORDING_SESSION_LABEL,
+                                   trial = TRIAL_INDEX, time = TIMESTAMP, condition = trialDirection)
+
+  plot(Sdata, pupil = LEFT_PUPIL_SIZE, group = 'RECORDING_SESSION_LABEL')
+
+  # Downsampling: This is useful when we have large scale data, or when we have sampled at a really high rate, and we need to reduce it so we are measuring meaningful change.
+  mean_data <- downsample_time_data(data = Sdata,
+                                    pupil = LEFT_PUPIL_SIZE,
+                                    timebin_size = 50,
+                                    option = 'median') # Calculating median pupil size in each timebin (ms)
+
+  # Check what it looks like
+  plot(mean_data, pupil = LEFT_PUPIL_SIZE, group = 'RECORDING_SESSION_LABEL', main = "mean pupil dilation, downsampled")
+
+  # Assessing how much missing data there is
+  missing <- calculate_missing_data(mean_data, LEFT_PUPIL_SIZE) # what percentage is missing per trial.
+
+  # In the tutorial, they remove trials that have more than 75% of data missing, and remove participants that have more than 75% of trials removed. We set this a bit higher and remove anyone with more than 50% missing.
+  mean_data2 <- clean_missing_data(mean_data,
+                                   pupil = LEFT_PUPIL_SIZE,
+                                   trial_threshold = .50,
+                                   subject_trial_threshold = .50)
+
+  filtered_data <- filter_data(data = mean_data2,
+                               pupil = LEFT_PUPIL_SIZE,
+                               filter = 'median',
+                               degree = 11) # The median filter and degree 11 are from the tutorial
+
+  # Check what it looks like
+  plot(filtered_data, pupil = LEFT_PUPIL_SIZE, group = 'RECORDING_SESSION_LABEL')
+
+  # Interpolate across blinks
+  int_data <- interpolate_data(data = filtered_data,
+                               pupil = LEFT_PUPIL_SIZE,
+                               type = 'linear') # fills gaps
+
+  # Check what it looks like
+  plot(int_data, pupil = LEFT_PUPIL_SIZE, group = 'RECORDING_SESSION_LABEL')
+
+  # Using the function we defined earlier to replace the detected patterns with the strings we want
+  subd_pup$message <- subd_pup$SAMPLE_MESSAGE
+
+  # Fill down for all timepoints with the messages
+  subd_message <- subd_pup %>%
+    mutate(message = as.character(message)) %>%
+    mutate(newMessage = ifelse(message == ".", NA, message)) %>%
+    fill(newMessage) %>%
+    mutate(newMessage = as.factor(newMessage))
+  
+  #I want to merge this with the filtered and interpolated data, but I can't do that without matching the timestamps, and because that data is downsampled, I have to downsample this one as well. I checked  how downsample_time_data sample is downsampling, floor or ceiling (it is floor, starts from 0)
+  
+  # Now keep the first row for each bin
+  subd_message_binned <- subd_message %>%
+  mutate(TIMESTAMP = floor(TIMESTAMP / 50) * 50) %>%
+  group_by(TIMESTAMP, RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  slice(1) %>%  #first row for each time bin
+  ungroup()
+  
+  # Rename LEFT_PUPIL_SIZE here to know which df it comes from, this is not interpolated
+  subd_message_binned <- subd_message_binned %>% 
+    rename(RAW_PUPIL_SIZE = LEFT_PUPIL_SIZE)
+
+  # Merge the filtered and interpolated data with the data that is labelled well
+  # I also want to bring triplet images displayed in blocks one and two under the same column
+  sub_merged <- merge(int_data, subd_message_binned, by = c("RECORDING_SESSION_LABEL", "TRIAL_INDEX", "TIMESTAMP"), all = TRUE) %>%
+  filter(Timebin > 0) %>%
+  group_by(TRIAL_INDEX) %>%
+  fill(newMessage, .direction = "downup") %>%
+  mutate(
+    triplet1 = case_when(
+      trial_category == "encoding" & triplet1_1 %in% c(".", "UNDEFINED") ~ triplet1_2,
+      trial_category == "encoding" ~ triplet1_1,
+      TRUE ~ NA_character_ # For non-encoding trials, leave as NA
+    ),
+    triplet2 = case_when(
+      trial_category == "encoding" & triplet2_1 %in% c(".", "UNDEFINED") ~ triplet2_2,
+      trial_category == "encoding" ~ triplet2_1,
+      TRUE ~ NA_character_
+    ),
+    triplet3 = case_when(
+      trial_category == "encoding" & triplet3_1 %in% c(".", "UNDEFINED") ~ triplet3_2,
+      trial_category == "encoding" ~ triplet3_1,
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(RECORDING_SESSION_LABEL, TIMESTAMP, Timebin, TRIAL_INDEX, triplet1, triplet2, triplet3, newMessage, orderPosition, LEFT_PUPIL_SIZE, LEFT_GAZE_X, LEFT_GAZE_Y, trialDirection.x, trial_category, trialType, eTrials, retTrials, decisionMade, encoding_order, retrievalImage) %>%
+  rename(trialDirection = trialDirection.x)
+
+  # We drop NA in the line after this, but that removes retrieval trials because they have NA values. To prevent this, I am renaming the trial direction column NA's to '.'
+  sub_merged <- sub_merged %>% 
+    mutate(trialDirection = ifelse(is.na(trialDirection), ".", as.character(trialDirection)))
+  
+  # Making 'decision made' numeric to calculate timestamps for retrieval decision time
+  sub_merged$decisionMade <- as.numeric(sub_merged$decisionMade)
+
+  # Resetting the timestamp at the beginning of each trial again 
+  subd_sub_merged <- sub_merged %>%
+  filter(TRIAL_INDEX > 0) %>%
+  drop_na(LEFT_PUPIL_SIZE, TRIAL_INDEX, TIMESTAMP) %>%  #drop rows with NA for important columns
+  droplevels() %>%
+  arrange(TIMESTAMP)
+  
+  print(paste("Rows after dropping NAs:", nrow(subd_sub_merged))) #how many rows did 'dropna' drop?
+  unique_trials <- unique(subd_sub_merged$TRIAL_INDEX)
+  
+  print(unique(subd_sub_merged$trial_category))
+  
+  # Calculate trial timing
+  for (trial in unique_trials) {
+    this_trial <- subd_sub_merged %>% filter(TRIAL_INDEX == trial)
+    print(paste("Processing trial:", trial))
+    start_trial <- this_trial$TIMESTAMP[1] # get first timestamp per trial
+    this_trial$new_time <- this_trial$TIMESTAMP - start_trial
+    
+    # Calculate decision_time if it's a retrieval trial
+    if (this_trial$trial_category[1] == "retrieval" && !is.na(this_trial$decisionMade[1])) {
+      this_trial$decision_time <- ceiling((this_trial$decisionMade - start_trial) / 50) * 50 #decision time, but rounding it up to the nearest 50 ms!
+      
+      # Flag impossible decision times (e.g., before decision buttons appear)
+      this_trial <- this_trial %>% mutate(
+      decision_time_status = ifelse(decision_time < 4500, "impossible", "valid"))
+      
+      } else if (this_trial$trial_category[1] == "retrieval") {
+        this_trial$decision_time <- NA  #retrieval trial without decisionMade
+        }
+    # Combine the trials
+    if (trial == unique_trials[1]) {
+      new_time_clean <- this_trial
+    } else {
+      new_time_clean <- rbind(new_time_clean, this_trial)
+    }
+  }
+  
+  # If the decision time calculation is off then timing information may be unreliable, so I remove these trials as well
+  removed_timing <- new_time_clean %>% 
+  filter(decision_time_status == "impossible") 
+  
+  new_time_clean <- new_time_clean %>% 
+  filter(decision_time_status != "impossible" | trial_category != "retrieval") %>%
+  select(-decision_time_status)
+  
+  print(paste("Rows in new_time_clean:", nrow(new_time_clean))) # are new rows being added?
+
+  # Merge data for all subjects together
+  if (filename == filtered_file_list[1]) {
+    all_data <- new_time_clean
+    all_missing <- missing
+    incorrect_method <- incorrect
+    removed_time_trials <- removed_timing
+  } else {
+    all_data <- rbind(all_data, new_time_clean)
+    all_missing <- rbind(all_missing, missing)
+    incorrect_method <- rbind(incorrect_method, incorrect)
+    removed_time_trials <- rbind(removed_time_trials, removed_timing)
+  }
+}
+
+# Now I want to "flag" the pre-decision phase using the decision_time column (which is why I rounded it down)
+all_data <- all_data %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  mutate(
+    preDecision = case_when(
+      # Mark the current row as 'Decision' when it matches new_time
+      !is.na(new_time) & !is.na(decision_time) & (new_time == decision_time) ~ "Decision",
+      # Check the rows two time bins before (100 ms before the decision), mark as pre-decision
+      row_number() == (which(new_time == decision_time)[1] - 2) ~ "Pre-decision",
+      row_number() == (which(new_time == decision_time)[1] - 1) ~ "Pre-decision",
+      # Check the rows two time bins after (100 ms before the decision), mark as post-decision
+      row_number() == (which(new_time == decision_time)[1] + 1) ~ "Post-decision",
+      row_number() == (which(new_time == decision_time)[1] + 2) ~ "Post-decision",
+      TRUE ~ NA_character_ 
+    ),
+    block = ifelse(TRIAL_INDEX < 46, 1, 2)) %>% #add in block information
+  ungroup()
+
+# Check participant id's
+unique(all_data$RECORDING_SESSION_LABEL)
+
+# Clean up participant response
+all_data$orderPosition <- str_extract(all_data$orderPosition, "[a-zA-Z]+")
+
+# Take a look
+summary(all_data)
+
+# Renaming variables
+all_data <- rename(all_data, trialOrder = trialType, orderResponse = orderPosition)
+
+# Now make sure all variables are in the format you want 
+all_data <- all_data %>%
+  mutate(across(c(trial_category, trialOrder, trialDirection),
+                as.factor))
+
+# Verify number of participants
+length(unique(all_data$RECORDING_SESSION_LABEL))
+
+# Write csv file for later use
+write.csv(all_data, here("Analysis/csv_output/allData.csv"))
+
+# Now summarize information from the pre-processing, what was removed?
+# Missing pupil values for each subject, per block
+missing_by_subj <- all_missing %>%
+  na.exclude() %>%
+  mutate(
+    trial_type = case_when(
+      TRIAL_INDEX >= 1 & TRIAL_INDEX < 26 ~ "encoding",
+      TRIAL_INDEX > 45 & TRIAL_INDEX < 71 ~ "encoding",
+      TRUE ~ "retrieval"
+    ),
+    block = case_when(
+      TRIAL_INDEX < 46 ~ 1,
+      TRIAL_INDEX >= 46 ~ 2
+    )
+  ) %>%
+  filter(Missing > 0.5) %>%
+  group_by(RECORDING_SESSION_LABEL, trial_type, block) %>%
+  summarize(count = n(), .groups = 'drop')
+
+# How many blocks had 50% or more of the trials missing?
+removed_blocks <- missing_by_subj %>%
+  mutate(removed = 
+           case_when(
+             count >= 10 ~ TRUE,
+             TRUE ~ FALSE
+           )) %>%
+  filter(removed == TRUE)
+
+# How many trials were removed total?
+missing_counts <- missing_by_subj %>%
+  group_by(trial_type) %>%
+  summarize(sum(count))
+
+# For how many trials did participants answer the attention check incorrectly?
+incorrect_method <- incorrect_method %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  slice(head(1))
+
+# For how many trials was timing information off?
+removed_time_trials <- removed_time_trials %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  slice(head(1))
+```
+
+**Data Processing**
+***Pupil data preprocessing***
+Pupil data were processed and cleaned in R using the PupillometryR package (Forbes, 2020). Pupil data were first down-sampled to 50 ms time bins, outlier data points (e.g., those corresponding to blinks) were filtered out using a median filter, and resulting gaps were linearly interpolated. Trials with 50% or more gaze data missing were removed from the analysis (*n* = `r missing_counts[1,2]` encoding, *n* = `r missing_counts[2,2]` retrieval). If a participant had 50% or more of their trials removed in a particular encoding or retrieval block, we removed all trials from that block from the analysis (*n* = `r length(removed_blocks$RECORDING_SESSION_LABEL)`, both encoding). For the encoding trials, only the ‘same’ trials were analyzed (80% of all encoding trials). We filtered out the encoding trials for which participants answered the attention check question incorrectly (*n* =  `r nrow(incorrect_method)` trials). For the retrieval trials, trials with ‘impossible’ time stamps for the participants' responses were removed from analyses (e.g., participant’s response was recorded before answer options appeared on the screen) (*n* = `r nrow(removed_time_trials)` trials). The remaining pupil values were converted from artificial units to mm using values obtained from a recording with an artificial pupil of a known size. 
+
+#4. Fixation data
+###Import and clean fixation data
+Because fixation data does not have trials removed due to missing eye data, it is useful for behavioral accuracy measures.
+```{r clean fixation data, echo=FALSE, include=FALSE, message=FALSE}
+# Get included participants
+participants <- read.csv(here("Analysis/csv_output/included_participants.csv"))
+
+# Import and clean fixation data
+all_fixation <- data.frame()
+cut_fix <- data.frame()
+filePath <- here("Data/fixation_reports")
+filtered_file_list <- list.files(filePath, pattern = "\\.csv$", full.names = TRUE)
+
+# Combine fixation reports
+filtered_file_list <- filtered_file_list[
+  unlist(sapply(filtered_file_list, function(x) {
+    Participant_ID <- str_extract(x, "\\d+")
+    Participant_ID %in% participants$Participant_ID
+  }))
+]
+
+for (filename in filtered_file_list) {
+  subFile <- here(filename) # get file name/location
+  fixation <- read.csv(subFile) # read in subject csv
+  
+  cut_method <- fixation %>% 
+    filter(methodCheck == 0)
+  
+  fixation <- fixation %>% 
+    filter(encodingType != "diff") %>%
+    filter(methodCheck != 0) # remove 'diff' trials, and trials for which methodCheck was incorrect
+  
+  # Set trial direction 
+  fixation <- fixation %>%
+    mutate(trialDirection = case_when(
+      trialType == "LMR" ~ "LR",
+      trialType == "RML" ~ "RL",
+      trialType == "RLM" ~ "NL",
+      trialType == "LRM" ~ "NL",
+      trialType == "MRL" ~ "NL",
+      trialType == "MLR" ~ "NL",
+      TRUE ~ NA 
+    ))
+  
+  # Put triplet info under one column (instead of two separate columns for each block)
+   sub_fix_clean <- fixation %>% 
+     mutate(
+    triplet1 = case_when(
+      trial_category == "encoding" & triplet1_1 %in% c(".", "UNDEFINEDnull") ~ triplet1_2,
+      trial_category == "encoding" ~ triplet1_1,
+      TRUE ~ NA_character_ # For non-encoding trials, leave as NA
+    ),
+    triplet2 = case_when(
+      trial_category == "encoding" & triplet2_1 %in% c(".", "UNDEFINEDnull") ~ triplet2_2,
+      trial_category == "encoding" ~ triplet2_1,
+      TRUE ~ NA_character_
+    ),
+    triplet3 = case_when(
+      trial_category == "encoding" & triplet3_1 %in% c(".", "UNDEFINEDnull") ~ triplet3_2,
+      trial_category == "encoding" ~ triplet3_1,
+      TRUE ~ NA_character_
+    )) %>%
+     select(c(RECORDING_SESSION_LABEL, TRIAL_INDEX, eTrials, retTrials, trial_category, triplet1, triplet2, triplet3, CURRENT_FIX_START, CURRENT_FIX_DURATION, CURRENT_FIX_X, CURRENT_FIX_Y, CURRENT_FIX_PUPIL, TRIAL_START_TIME, CURRENT_FIX_MSG_TEXT_1, trialType, trialDirection, retrievalImage, encoding_order, orderPosition))
+   
+  # Merge data for all subjects 
+  if (filename == filtered_file_list[1]) {
+    all_fixation <- sub_fix_clean
+    cut_fix <- cut_method
+  } else {
+    all_fixation <- rbind(all_fixation, sub_fix_clean)
+    cut_fix <- rbind(cut_fix, cut_method)
+  }
+}
+
+# Find how many 'different' trials were cut
+cut_fix <- cut_fix %>%
+  filter(method_Trial != "diff") %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  reframe(methodCheck, method_Trial)%>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  slice_head(n = 1)
+
+# Extract participant id's
+all_fixation$RECORDING_SESSION_LABEL <- str_extract(all_fixation$RECORDING_SESSION_LABEL, "\\d+")
+unique(all_fixation$RECORDING_SESSION_LABEL)
+
+# Mark block information based on trial number
+all_fixation <- all_fixation %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  mutate(block = ifelse(TRIAL_INDEX < 46, 1, 2))
+
+# Remove unnecessary characters from the participant responses for later comparison
+all_fixation$orderPosition <- str_extract(all_fixation$orderPosition, "[a-zA-Z]+")
+
+# Set the encoding position of the image, checking which encoding trial did that image come from, and that trial type was that (e.g., left-middle-right)
+all_fixation <- all_fixation %>%
+  group_by(RECORDING_SESSION_LABEL) %>%
+  mutate(
+    encoding_position = map2_chr(retrievalImage, trialType, function(retrieval_img, trial_type) {
+      match_found <- NA_character_
+      
+      if (!is.na(retrieval_img) && retrieval_img != "UNDEFINEDnull" && retrieval_img != ".") {
+        match_row <- which(triplet1 == retrieval_img | triplet2 == retrieval_img | triplet3 == retrieval_img)
+        
+        if (length(match_row) > 0) {
+          match_found <- trialType[match_row[1]]
+        }
+      }
+      match_found
+    })
+  ) %>%
+  ungroup()
+
+# Set it by extracting this from the trial type (e.g., if the trial was left-middle-right and order was second, position was 'middle')
+all_fixation <- all_fixation %>%
+  mutate(encoding_position = 
+  case_when(
+        encoding_order == "first" ~ substr(encoding_position, 1, 1),
+        encoding_order == "second" ~ substr(encoding_position, 2, 2),
+        encoding_order == "third" ~ substr(encoding_position, 3, 3)))
+
+# Remove outlier fixations, keeping only the ones between 150 and 1000 ms (in case you want to analyze it later)
+all_fixation <- all_fixation %>%
+  filter(CURRENT_FIX_DURATION < 1001, CURRENT_FIX_DURATION > 149)
+
+# Rename to match all_data
+all_fixation <- rename(all_fixation, orderResponse = orderPosition)
+
+# Add current fix end time (for potential fixation analyses in the future)
+all_fixation <- all_fixation %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  mutate(
+  CURRENT_FIX_END = CURRENT_FIX_START + CURRENT_FIX_DURATION) %>%
+  relocate(CURRENT_FIX_END, .before =12) %>%
+  select(-c(TRIAL_START_TIME, CURRENT_FIX_MSG_TEXT_1))
+
+# Take a look
+summary(all_fixation)
+length(unique(all_fixation$RECORDING_SESSION_LABEL))
+
+# Check how many encoding trials each participant is contributing
+fix_enc_trials <- all_fixation %>%
+   filter(trial_category == "encoding") %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX, block) %>%
+  summarize(trialDirection = first(trialDirection), .groups = 'drop') %>%
+  arrange(RECORDING_SESSION_LABEL)
+
+# Check how many trials are missing for each participant
+fix_enc_counts_sub <- fix_enc_trials %>%
+  group_by(RECORDING_SESSION_LABEL, block) %>%
+  summarize(trial_count = n(), .groups = 'drop') %>%
+  arrange(RECORDING_SESSION_LABEL) %>%
+  mutate(exclude = case_when(
+    trial_count <11 ~ TRUE,
+    TRUE ~ FALSE))
+# Check how many retrieval trials each participant is contributing
+fix_ret_trials <- all_fixation %>%
+   filter(trial_category == "retrieval") %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX, block) %>%
+  summarize(encoding_order = first(encoding_order), .groups = 'drop') %>%
+  arrange(RECORDING_SESSION_LABEL, TRIAL_INDEX)
+
+# How many retrieval trials are missing for each participant
+fix_ret_counts_sub <- fix_ret_trials %>%
+  group_by(RECORDING_SESSION_LABEL, block) %>%
+  summarize(trial_count = n(), .groups = 'drop') %>%
+  arrange(RECORDING_SESSION_LABEL) %>%
+  mutate(exclude = case_when(
+    trial_count <11 ~ TRUE,
+    TRUE ~ FALSE))
+
+all_fixation <- all_fixation %>%
+  anti_join(fix_enc_counts_sub %>% filter(exclude == TRUE), 
+            by = c("RECORDING_SESSION_LABEL", "block"))
+
+all_fixation <- all_fixation %>%
+  anti_join(fix_ret_counts_sub %>% filter(exclude == TRUE), 
+            by = c("RECORDING_SESSION_LABEL", "block"))
+
+# Write csv file for later use
+write.csv(all_fixation,(here("Analysis/csv_output/allFixation.csv")))
+```
+
+#5. Behavioral data
+Find the 'origin' encoding trials of retrieval images
+```{r shape behavioral data, echo=FALSE, include=FALSE, message=FALSE}
+# Fixation data doesn't have removals due to missing eye data, so using that for behavioral accuracy
+all_fixation <- read.csv((here("Analysis/csv_output/allFixation.csv")))
+all_fixation <- all_fixation  %>%
+  select(-c(X))
+
+# Get just one row per trial
+recall_data <- all_fixation %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  slice(1)
+# Now get the original trial number and direction
+# Use the function we defined in setup to find 'origin' encoding trial numbers and direction for each retrieval image
+# Split by participant and block to apply the function
+participants_block <- split(recall_data, list(recall_data$RECORDING_SESSION_LABEL, recall_data$block))
+
+# Apply the function to each participant/block separately
+updated_data <- lapply(participants_block, function(trial_block) {
+  # Run function 
+  trial_block <- find_origin_encoding_trials(trial_block)
+  # Make sure the column exists and is character (otherwise there are issues when merging it back together)
+  if (!"originTrialDir" %in% names(trial_block)) {
+    trial_block$originTrialDir <- NA_character_
+  } else {
+    trial_block$originTrialDir <- as.character(trial_block$originTrialDir)
+  }
+  trial_block
+})
+
+# Merge it back together
+recall_data_full <- do.call(rbind, updated_data)
+
+# Get rid of NA's 
+recall_data_full <- recall_data_full[!is.na(recall_data_full$TRIAL_INDEX), ]
+
+# Make new df with only the clean retrieval data, with retrieval accuracy
+all_recall_clean <- recall_data_full %>%
+  filter(trial_category == "retrieval", !is.na(originTrialDir)) %>% # remove if encoding info is missing
+  mutate(is_correct = 
+           if_else(encoding_order == orderResponse, 1, 0))
+
+# Select columns we are interested in
+all_recall_clean <- all_recall_clean %>%
+  filter(trial_category == "retrieval") %>%
+  select(c("RECORDING_SESSION_LABEL", "TRIAL_INDEX", "retTrials", "retrievalImage", "encoding_order","encoding_position", "orderResponse", "is_correct", "block", "originEncodingTrial", "originTrialDir"))
+
+# Save clean edrecall data
+write.csv(all_recall_clean, (here("Analysis/csv_output/all_recall_clean.csv")))
+
+# Check order/position balancing
+ret_trial_balance <- all_recall_clean %>%
+  group_by(RECORDING_SESSION_LABEL, encoding_order, block) %>%
+  summarize(trial_count = n(), .groups = 'drop',) %>%
+  arrange(RECORDING_SESSION_LABEL, encoding_order) %>%
+  filter(encoding_order != ".")
+
+# Save the information
+#write.csv(ret_trial_balance,(here("trial balancing/behavioral_ret_subj.csv")))
+
+# Check what the order/position of the recall images were during encoding
+ret_balance_tot <- all_recall_clean %>%
+  group_by(encoding_order, encoding_position) %>%
+  summarize(tot = sum(trial_count = n()))
+
+# Save the information
+#write.csv(ret_balance_tot, "trial balancing/behavioral_ret_balance.csv")
+```
+
+#6. Pupil size conversion
+You can apply scaling factor: scaling factor * sqrt(LEFT_PUPIL_SIZE)
+```{r pupil conversion, include=FALSE, echo=FALSE, message=FALSE}
+ # Check the pup conversion rmd file for a detailed explanation
+artificial_pup <- read.csv(here("Analysis/artificial_pupil.csv"))
+mean_artifical_size <- mean(artificial_pup$LEFT_PUPIL_SIZE)
+scaling_factor <- 6/sqrt(mean_artifical_size)
+scaling_factor
+
+all_data$pup_mm <- scaling_factor * sqrt(all_data$LEFT_PUPIL_SIZE)
+
+write.csv(all_data, (here("Analysis/csv_output/allData.csv")))
+```
+#7. Further exclusions/refinement/removal outliers. 
+```{r prep for further exclusions,include=FALSE, echo=FALSE, message=FALSE}
+all_data <- read.csv((here("Analysis/csv_output/allData.csv")))
+
+all_data <- all_data%>%
+  select(-c(X))
+
+all_recall_clean <- read.csv((here("Analysis/csv_output/all_recall_clean.csv")))
+
+all_recall_clean <- all_recall_clean%>%
+  select(-c(X))
+
+# Data types change again after reading in the csv, so make sure to make the changes after you load them. 
+all_data <- all_data %>%
+  mutate(across(
+    c(orderResponse, trialDirection, trial_category, trialOrder, block, encoding_order, preDecision, block),
+    as.factor))
+
+all_recall_clean <- all_recall_clean %>%
+  mutate(across(
+    c(encoding_order, encoding_position, orderResponse, is_correct, block, originTrialDir),
+    as.factor))
+
+# Dataframe for the encoding phase: I'm cutting timestamps longer than 15 seconds (this is when the attention question appears, so I will mark this as the end of the encoding phase with a half second buffer)
+encoding_phase <- all_data %>%
+  filter(trial_category == "encoding",
+         new_time < 15050)
+
+# Dataframe for the retrival phase:
+retrieval_phase <- all_data %>%
+  filter(trial_category == "retrieval")
+```
+##7A. Gaze Location: remove outliers
+```{r gaze location z scores, include=FALSE, echo=FALSE, message=FALSE}
+# Make sure gaze data is numeric
+retrieval_phase <- retrieval_phase %>%
+  mutate(across(
+    c(LEFT_GAZE_X, LEFT_GAZE_Y),
+    as.numeric))
+
+#  Screen coordinates are 1024 (x-axis) x 1280 (y-axis)
+before_filter <- nrow(retrieval_phase)
+
+retrieval_phase <- retrieval_phase %>%
+  filter(LEFT_GAZE_X >= 0, LEFT_GAZE_X <= 1024, 
+         LEFT_GAZE_Y >= 0, LEFT_GAZE_Y <= 1280)
+  
+after_filter <- nrow(retrieval_phase)
+
+gaze_filtered <- round(100 * (before_filter - after_filter) / (after_filter + before_filter))
+
+# Now get the 'pre-decision' time we use for gaze analyses and remove outlier points
+preDecision <- retrieval_phase %>%
+  filter(new_time > 3450, new_time < 4550)
+
+# Get Z scores
+gaze_x_zscores <- preDecision %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  mutate(gaze_zscore = c(scale(LEFT_GAZE_X, center = TRUE, scale = TRUE)))
+
+# Create a separate df to see outliers
+gaze_x_outlier <- gaze_x_zscores %>%
+  filter(!between(gaze_zscore, -1.95, 1.95))
+
+# Visualize outliers:
+gaze_x_zscores <-gaze_x_zscores %>%
+  mutate(outlier = case_when(
+  gaze_zscore < -1.95 ~TRUE,
+  gaze_zscore > 1.95 ~TRUE,
+  TRUE ~FALSE))
+
+# Visualize the outliers
+ggplot(gaze_x_zscores, aes(x = LEFT_GAZE_X, y = LEFT_GAZE_Y, colour = outlier)) + 
+  geom_point(size = 1.5, alpha = 0.5) +
+  scale_y_reverse() + 
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black"))
+
+# How many points are removed?
+# Total data points:
+nrow(gaze_x_zscores)
+
+# Outlier points
+nrow(gaze_x_outlier)
+
+gaze_outlier_percentage <- round(100 * nrow(gaze_x_outlier) / (nrow(gaze_x_outlier) + nrow(gaze_x_zscores)))
+
+# Join with retrieval_phase and filter out individual outlier points
+retrieval_phase <- full_join(preDecision, gaze_x_zscores)
+retrieval_phase <- retrieval_phase %>%
+  filter(between(gaze_zscore, -1.95, 1.95))
+
+# Visualize gaze dispersion after outlier removal
+ggplot(retrieval_phase, aes(x = LEFT_GAZE_X, y = LEFT_GAZE_Y)) + 
+  geom_point(size = 1.5, alpha = 0.5) +
+  scale_y_reverse()
+
+summary(gaze_x_outlier)
+```
+##7B. Reaction time, remove outlier trials (time to decision for each participant)
+```{r remove outlier reaction times, include=FALSE, echo=FALSE, message=FALSE}
+# For retrieval trials, we also want to remove RT's that are more than 2 sd's than the subject's mean (taking too long to answer/remember)
+RT_zscores <- retrieval_phase %>%
+  group_by(RECORDING_SESSION_LABEL) %>%
+  mutate(zbase_RT = c(scale(decision_time, center = T, scale = T)))
+
+# I want to see which ones get removed so first I will put them in a separate df
+cut_RT <- RT_zscores %>%
+  filter(!between(zbase_RT, -1.95, 1.95)) %>%
+  distinct(RECORDING_SESSION_LABEL, TRIAL_INDEX)
+
+# Filter outlier values:For each subject, remove 'decision_time' values that are above their 'high_RT' value.
+retrieval_phase <- full_join(retrieval_phase, RT_zscores)
+
+retrieval_phase <- retrieval_phase %>%
+  filter(between(zbase_RT, -1.95, 1.95))
+```
+
+##7C. Pupil baselining, remove outlier baseline scores, get relative dilation
+```{r pupil baselining, include=FALSE, echo=FALSE, message=FALSE}
+encoding_phase <- encoding_phase %>%
+  mutate(across(
+    c(RECORDING_SESSION_LABEL, orderResponse, trialDirection, trial_category, trialOrder, block, encoding_order, preDecision, block),
+    as.factor))
+
+encoding_phase <- encoding_phase %>%
+  mutate(across(
+    c(LEFT_GAZE_X, LEFT_GAZE_Y), as.numeric))
+
+# Calculate baseline pupil dilation using the last 100 ms of fixation cross
+enc_baseline_pup_data = encoding_phase %>%
+  filter(new_time >= 1900 & new_time < 2050) %>% #last 100 ms of the fixation period is 2 timebins
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX) %>%
+  summarise(base_pup = mean(pup_mm))
+
+# Plot it
+ggplot(enc_baseline_pup_data, aes(x=TRIAL_INDEX, y = base_pup)) + geom_point() + facet_wrap(~RECORDING_SESSION_LABEL) #plotting the baseline for each encoding trial per participant, there is lots of variability!
+
+# Do any trials have a bad baseline and need to be cut? Look at zscores:
+enc_baseline_zscores <- enc_baseline_pup_data %>%
+  group_by(RECORDING_SESSION_LABEL) %>%
+  mutate(zbase_pup = c(scale(base_pup, center = T, scale = T)))
+
+# Join with full dataframe
+enc_data_relative <- full_join(encoding_phase, enc_baseline_zscores)
+
+# I want to remove outlier zscores while keeping track of how many trials are being cut
+cut_baseline_trials <- tibble()
+
+cut_enc <- enc_data_relative %>%
+  filter(!between(zbase_pup, -1.95, 1.95)) %>%
+  distinct(RECORDING_SESSION_LABEL, TRIAL_INDEX)
+
+# Remove outlier baseline values
+enc_data_relative <- enc_data_relative %>%
+  filter(between(zbase_pup,-1.95,1.95)) %>%
+  mutate(rel_pup = (pup_mm-base_pup))
+
+summary(enc_data_relative)
+
+write.csv(enc_data_relative, (here("Analysis/csv_output/enc_data_relative.csv")))
+```
+##7D. Trial balancing, confirm that trial direction at encoding, and order/position balancing at retrieval work well. Remove blocks with more than half of the data missing.
+```{r trial direction/order/position balancing, include=FALSE, echo=FALSE, message=FALSE}
+# Look at the order/position balancing of behavioral data (this is likely very similar to the one we have from gaze data)
+beh_trialCounts <- all_recall_clean %>%
+  group_by(RECORDING_SESSION_LABEL, encoding_order, block) %>%
+  summarize(trial_count = n(), .groups = 'drop',) %>%
+  arrange(RECORDING_SESSION_LABEL, encoding_order) %>%
+  filter(encoding_order != ".")
+
+# Do counts for behavioral data
+beh_retrieval_balance <- all_recall_clean %>%
+     group_by(encoding_order, encoding_position) %>%
+     summarize(trial_count = n_distinct(paste(RECORDING_SESSION_LABEL, TRIAL_INDEX)), 
+               .groups = 'drop')
+
+beh_retrieval_balance <- beh_retrieval_balance %>%
+  pivot_wider(
+    names_from = encoding_order,  
+    values_from = trial_count  
+  )
+
+# Check what the trial balance encoding trials look like after the exclusions
+encTrials <- encoding_phase %>%
+  group_by(RECORDING_SESSION_LABEL, TRIAL_INDEX, block) %>%
+  summarize(trialDirection = first(trialDirection), .groups = 'drop') %>%
+  arrange(RECORDING_SESSION_LABEL, TRIAL_INDEX)
+
+# Do any participants have very few trials in one trial direction
+enc_trialTot <- encTrials %>%
+  filter(trialDirection != ".") %>%
+  group_by(trialDirection) %>%
+  summarize(trial_count = n(), .groups = 'drop')
+
+# Do any participants have very few trials
+enc_subjTot <- encTrials %>%
+  group_by(RECORDING_SESSION_LABEL, block) %>%
+  summarize(trial_count = n(), .groups = 'drop') %>%
+  arrange(RECORDING_SESSION_LABEL) %>%
+  mutate(exclude = case_when(
+    trial_count <11 ~ TRUE,
+    TRUE ~ FALSE))
+# None of the participants have 50% or more of an encoding block missing
+
+# Doing the same for retrieval trials
+# First merge with behavioral data so we have the encoding position information
+common_cols <- setdiff(intersect(names(retrieval_phase), names(all_recall_clean)), 
+                        c("RECORDING_SESSION_LABEL", "TRIAL_INDEX"))
+
+retrieval_phase <- retrieval_phase %>%
+  left_join(all_recall_clean %>% select(-all_of(common_cols)), 
+            by = c("RECORDING_SESSION_LABEL", "TRIAL_INDEX"))
+
+#How are retrieval trials (for which we have eye data) distributed in terms of order and position?
+ret_trial_balance <- retrieval_phase %>%
+  group_by(encoding_order, encoding_position) %>%
+  filter(!is.na(encoding_order), !is.na(encoding_position)) %>%
+  summarize(trial_count = length(unique(TRIAL_INDEX)), .groups = 'drop')
+
+# How many retieval trials per participant? Are they missing more than half for a particular block? (for gaze data)
+ret_trialSubj <- retrieval_phase %>%
+  group_by(RECORDING_SESSION_LABEL, block) %>%
+  summarize(trial_count = length(unique(TRIAL_INDEX)), .groups = 'drop') %>%
+  arrange(RECORDING_SESSION_LABEL) %>%
+  mutate(exclude = case_when(
+    trial_count <11 ~ TRUE,
+    TRUE ~ FALSE))
+
+# One participant has 50% of one retrieval block missing.
+
+# Filter these participants or blocks from the encoding df: (currently only removing ones with more than 50% missing)
+retrieval_phase <- retrieval_phase %>%
+  anti_join(ret_trialSubj %>% filter(exclude == TRUE), 
+            by = c("RECORDING_SESSION_LABEL", "block"))
+```
+***Pupil dilation at encoding***
+Our primary period of interest for measuring pupil dilation was the initial presentation of the triplet of images. For each trial and each participant, we calculated a baseline measure of pupil dilation that corresponded to the average pupil dilation during the final 100 ms of the fixation period before the first image in the triplet. Baseline pupil dilation values that were two standard deviations above or below the mean were considered outliers and excluded from the data (*n* = `r nrow(cut_enc)` trials). Two additional encoding trials were removed due to the experimenter pausing the study to recalibrate the eye tracker.
+
+***Gaze location at retrieval***
+Our primary period of interest for measuring gaze movements was the 1000 ms period in which participants saw a blank screen after viewing the retrieval image and before answer options appeared on the screen. Because the eye-tracker projects gaze locations for off-screen looks, we filtered all data points that were projected to be outside the screen coordinates (`r gaze_filtered`% of the points). [This resulted in one participant only having 50% of the trials for a retrieval block, so that block was removed]. Trials with response times for the recall questions that were two standard deviations above the mean for each participant were considered outliers and excluded from the data (*n* = `r nrow(cut_RT)` trials). This resulted in one participant only having 50% of their retrieval trials remain for one block, so trials from that block were also removed. We also removed outlier gaze points that were two standard deviations away from the mean coordinates on a given trial (`r gaze_outlier_percentage`% of the points). This was to eliminate gaze positions captured while participants were making eye movements off the screen, which were removed from the analyses. In our preregistered analysis plan, we proposed to explore the displacement in participants’ eye movements. We planned to analyze the movement between participants’ final fixation point while the retrieval image was present, and their first fixation point after the retrieval image disappeared, using x-axis coordinates. However, because many participants did not have this data (e.g., due to looking off screen after seeing the image), we used raw gaze data to calculate gaze movements during the retrieval period instead.
+
+***Behavioral data***
+Retrieval trials that featured images from trials in which participants answered the attention check question incorrectly (*n* = `r nrow(cut_fix)` trials) were removed from analyses. 
